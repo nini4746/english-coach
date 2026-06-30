@@ -15,7 +15,8 @@ function showView(name) {
   document.querySelectorAll(".nav").forEach((n) => n.classList.toggle("active", n.dataset.view === name));
   if (window.innerWidth <= 820) document.body.classList.remove("drawer-open");
   if (name === "dashboard") loadDashboard();
-  if (name === "progress") { loadTrend(); loadWeaknesses("weakness"); }
+  if (name === "progress") { loadTrend(); loadWeaknesses("weakness"); loadCompare(); }
+  if (name === "analyze") preflight();
   if (name === "vocab") loadVocab();
   if (name === "practice") { recommendFocus(); loadPracticeHistory(); }
   if (name === "history") loadHistory();
@@ -73,6 +74,7 @@ function renderDiagnosis(d, elId = "report") {
       html += `<table class="dx-ex"><tr><th>원문</th><th>교정</th></tr>` +
         h.examples.map((x) => `<tr><td>${e(x.original)}</td><td>${e(x.correction)}</td></tr>`).join("") + `</table>`;
     if (h.practice_tip) html += `<div class="dx-tip"><b>연습 팁</b> ${e(h.practice_tip)}</div>`;
+    html += `<div class="dx-actions"><button class="mini-btn" data-action="practice-cat" data-cat="${e(h.category || "other")}">이 약점으로 연습 →</button></div>`;
     html += `</div>`;
   });
   // conversation ability (comprehension / engagement / coherence)
@@ -95,7 +97,9 @@ function renderDiagnosis(d, elId = "report") {
     html += `<div class="dx-block"><h3>격식 (register)</h3><p><b>${e(d.register.level || "")}</b> — ${e(d.register.advice)}</p></div>`;
   if (d.vocabulary_upgrades?.length)
     html += `<div class="dx-block"><h3>어휘 업그레이드</h3>` + d.vocabulary_upgrades.map((v) =>
-      `<div class="dx-vu"><span class="dx-over">${e(v.overused)}</span> → ${(v.suggestions || []).map(e).join(", ")}` +
+      `<div class="dx-vu"><span class="dx-over">${e(v.overused)}</span> → ` +
+      (v.suggestions || []).map((sg) =>
+        `<span class="dx-sg">${e(sg)}<button class="mini-btn add" data-action="add-vocab" data-word="${e(sg)}" data-theme="어휘 업그레이드" data-note="${e(v.overused)} 대체" title="단어장에 추가">+</button></span>`).join(" ") +
       (v.example ? `<div class="dx-ex-line">"${e(v.example)}"</div>` : "") + `</div>`).join("") + `</div>`;
   if (d.strengths?.length)
     html += `<div class="dx-block dx-strength"><h3>강점</h3><ul>` + d.strengths.map((s) => `<li>${e(s)}</li>`).join("") + `</ul></div>`;
@@ -128,6 +132,7 @@ $("sampleSelect").addEventListener("change", async (e) => {
   $("transcript").value = data.text || "";
   const m = name.match(/(\d{4}-\d{2}-\d{2})/);
   if (m) $("date").value = m[1];
+  preflight();
 });
 
 $("analyzeBtn").addEventListener("click", async () => {
@@ -331,6 +336,79 @@ async function loadDashboard() {
        <a class="link" data-view="history" id="dashRecentLink">자세히 보기 →</a>`
     : `<span class="hint">아직 분석 기록이 없습니다. "분석하기"에서 시작하세요.</span>`;
   $("dashRecentLink")?.addEventListener("click", () => showView("history"));
+}
+
+// ── diagnosis → action (practice / vocab) ─────────────────────────
+document.addEventListener("click", (ev) => {
+  const el = ev.target.closest("[data-action]");
+  if (!el) return;
+  if (el.dataset.action === "practice-cat") startPracticeFor(el.dataset.cat);
+  if (el.dataset.action === "add-vocab") addVocabQuick(el, el.dataset.word, el.dataset.theme, el.dataset.note);
+});
+async function startPracticeFor(cat) {
+  showView("practice");
+  await recommendFocus();           // let the auto-recommend settle first…
+  const sel = $("focusSelect");
+  if ([...sel.options].some((o) => o.value === cat)) sel.value = cat;  // …then force this habit
+  $("genPractice").click();
+}
+async function addVocabQuick(btn, word, theme, note) {
+  if (!word) return;
+  const r = await fetch("/api/vocab", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ word, theme: theme || "", note: note || "" }) });
+  if (r.ok) { btn.textContent = "✓"; btn.disabled = true; btn.classList.add("done"); }
+}
+
+// ── transcript preflight (catch bad input before the agent runs) ───
+function preflight() {
+  const box = $("preflight");
+  if (!box) return;
+  const text = $("transcript").value;
+  if (!text.trim()) { box.innerHTML = ""; box.className = "preflight"; return; }
+  const speaker = ($("speaker").value.trim() || "Me");
+  const speakers = {};
+  let matched = 0, malformed = 0;
+  text.split("\n").forEach((ln) => {
+    if (!ln.trim()) return;
+    const m = ln.match(/^\s*([^:]+):\s?(.*)/);
+    if (m) { const sp = m[1].trim(); speakers[sp] = (speakers[sp] || 0) + 1; if (sp.toLowerCase() === speaker.toLowerCase()) matched++; }
+    else malformed++;
+  });
+  const chips = Object.entries(speakers)
+    .map(([sp, n]) => `<span class="pf-chip${sp.toLowerCase() === speaker.toLowerCase() ? " me" : ""}">${escapeHtml(sp)} · ${n}줄</span>`).join("");
+  let warn = "";
+  if (!Object.keys(speakers).length) warn = `<span class="pf-bad">화자(<code>이름:</code>) 형식 줄이 없습니다. 각 줄을 <code>Me: ...</code>처럼 쓰세요.</span>`;
+  else if (matched === 0) warn = `<span class="pf-bad">화자 "${escapeHtml(speaker)}"의 줄이 없습니다. 화자 이름을 확인하세요.</span>`;
+  else if (malformed > 0) warn = `<span class="pf-warn">화자 형식이 아닌 줄 ${malformed}개는 무시됩니다.</span>`;
+  else warn = `<span class="pf-ok">"${escapeHtml(speaker)}" ${matched}줄 분석 준비됨.</span>`;
+  box.className = "preflight on";
+  box.innerHTML = `<div class="pf-chips">${chips}</div>${warn}`;
+}
+$("transcript").addEventListener("input", preflight);
+$("speaker").addEventListener("input", preflight);
+
+// ── session comparison (latest vs previous) ───────────────────────
+async function loadCompare() {
+  const rows = await fetch("/api/sessions").then((r) => r.json());
+  const el = $("compare");
+  if (!el) return;
+  if (rows.length < 2) { el.innerHTML = `<span class="hint">세션이 2개 이상이면 비교가 표시됩니다.</span>`; return; }
+  const prev = rows[rows.length - 2], last = rows[rows.length - 1];
+  const METRICS = [
+    ["filler_rate", "필러/100단어", "down"],
+    ["type_token_ratio", "어휘 다양성 (TTR)", "up"],
+    ["avg_sentence_length", "평균 문장 길이", "up"],
+    ["short_fragments", "짧은 단편 수", "down"],
+  ];
+  el.innerHTML = `<p class="hint">${prev.date} → ${last.date}</p>` + METRICS.map(([k, lbl, better]) => {
+    const a = prev[k], b = last[k];
+    const d = Math.round((b - a) * 1000) / 1000;
+    const same = b === a;
+    const improved = better === "down" ? b < a : b > a;
+    const arrow = same ? "—" : `${d > 0 ? "+" : ""}${d}`;
+    return `<div class="crow"><span class="clbl">${lbl}</span><span class="cval">${a} → ${b}</span>
+      <span class="cdelta ${same ? "" : improved ? "good-delta" : "bad-delta"}">${arrow}</span></div>`;
+  }).join("");
 }
 
 // ── init ──────────────────────────────────────────────────────────

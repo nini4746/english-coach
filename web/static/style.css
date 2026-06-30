@@ -267,3 +267,35 @@ code { background: var(--panel-2); padding: 1px 6px; border-radius: 5px; font-si
 .pq .qtext { flex: 1; font-size: 14px; }
 .pq input { width: 150px; margin-top: 0; }
 .practice-result { margin-top: 14px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; white-space: pre-wrap; font-size: 13px; font-family: ui-monospace, monospace; }
+
+/* ── diagnosis → action buttons ── */
+.dx-actions { margin-top: 10px; }
+.mini-btn { width: auto; display: inline-flex; align-items: center; gap: 4px;
+  font-size: 12px; padding: 5px 11px; border-radius: 7px; cursor: pointer;
+  background: var(--panel-2); color: var(--accent); border: 1px solid var(--border); }
+.mini-btn:hover { border-color: var(--accent); }
+.mini-btn.add { padding: 1px 8px; margin-left: 5px; font-weight: 700; }
+.mini-btn.done { color: var(--accent-2); border-color: var(--accent-2); cursor: default; }
+.dx-sg { display: inline-flex; align-items: center; margin-right: 6px; }
+
+/* ── transcript preflight ── */
+.preflight { margin-top: 10px; }
+.preflight.on { padding: 10px 12px; background: var(--panel-2);
+  border: 1px solid var(--border); border-radius: 9px; font-size: 13px; }
+.pf-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+.pf-chip { font-size: 12px; padding: 2px 9px; border-radius: 20px;
+  background: var(--panel); border: 1px solid var(--border); color: var(--muted); }
+.pf-chip.me { color: var(--accent-2); border-color: var(--accent-2); }
+.pf-ok { color: var(--accent-2); }
+.pf-warn { color: var(--warn); }
+.pf-bad { color: var(--danger); }
+
+/* ── session comparison ── */
+.compare .crow { display: flex; align-items: center; gap: 10px; padding: 8px 0;
+  border-bottom: 1px solid var(--border); }
+.compare .crow:last-child { border-bottom: none; }
+.compare .clbl { flex: 1; font-size: 13.5px; }
+.compare .cval { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 110px; text-align: right; }
+.compare .cdelta { min-width: 64px; text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; }
+.compare .good-delta { color: var(--accent-2); }
+.compare .bad-delta { color: var(--danger); }

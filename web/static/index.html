@@ -64,6 +64,7 @@
           </div>
           <button id="analyzeBtn">분석하기 →</button>
           <p class="hint">각 줄은 <code>Me: ...</code> / <code>Tutor: ...</code> 형식. 선택한 화자만 분석합니다.</p>
+          <div id="preflight" class="preflight"></div>
         </section>
 
         <section class="panel report-panel">
@@ -97,6 +98,10 @@
           <canvas id="trendChart" height="220"></canvas>
           <div id="trendEmpty" class="hint">저장된 세션이 없습니다. 세션 날짜를 정하고 분석하면 추적이 시작됩니다.</div>
           <button id="refreshTrend" class="ghost">새로고침</button>
+        </section>
+        <section class="panel">
+          <h2>최근 vs 이전 세션</h2>
+          <div id="compare" class="compare"><span class="hint">세션이 2개 이상이면 비교가 표시됩니다.</span></div>
         </section>
         <section class="panel">
           <h2>반복 실수 프로필</h2>
@@ -136,7 +141,11 @@
               <option value="preposition">전치사</option>
               <option value="plural">복수형</option>
               <option value="word_choice">어휘 선택 / 콩글리시</option>
+              <option value="word_order">어순</option>
               <option value="formality">격식 (register)</option>
+              <option value="filler">필러 (um, you know)</option>
+              <option value="pace">말 속도 / 문장 길이</option>
+              <option value="other">기타</option>
             </select>
           </label>
           <button id="genPractice" class="ghost">연습문제 생성</button>
