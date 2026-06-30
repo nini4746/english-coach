@@ -87,6 +87,19 @@ def load_transcript(file: str, speaker: str = "Me") -> str:
             f"--- {speaker}'s utterances ---\n{text}")
 
 
+def search_grammar_ref(query: str, k: int = 3) -> str:
+    """Retrieve relevant grammar/usage reference passages (RAG over docs/) so the
+    agent can ground and CITE its explanations. Returns numbered chunks with source."""
+    import rag
+    hits = rag.search(query, k)
+    if not hits:
+        return "(no reference found)"
+    out = []
+    for i, h in enumerate(hits, 1):
+        out.append(f"[{i}] source={h['source']}\n{h['text']}")
+    return "\n\n".join(out)
+
+
 def read_dialogue(file: str) -> str:
     """Return the FULL transcript (all speakers, in order) so comprehension and
     response-appropriateness can be judged from the Tutor↔Me exchange."""
@@ -488,6 +501,12 @@ TOOLS = [
      "description": "Return the FULL transcript (both speakers, in order). Use this to judge whether "
                     "the student understood the tutor's questions and responded appropriately/coherently.",
      "input_schema": {"type": "object", "properties": {"file": {"type": "string"}}, "required": ["file"]}},
+    {"name": "search_grammar_ref",
+     "description": "RAG: retrieve grammar/usage reference passages for an error or topic so you can "
+                    "ground and cite your explanation. Returns chunks tagged with their source file. "
+                    "Call this for each major error to back up the 'why'.",
+     "input_schema": {"type": "object", "properties": {
+         "query": {"type": "string"}, "k": {"type": "integer"}}, "required": ["query"]}},
     {"name": "filler_stats",
      "description": "Count filler words (um, uh, you know, like, actually...) and the rate per 100 words.",
      "input_schema": {"type": "object", "properties": {
@@ -571,6 +590,8 @@ def dispatch(name: str, ti: dict) -> str:
         return load_transcript(ti["file"], sp)
     if name == "read_dialogue":
         return read_dialogue(ti["file"])
+    if name == "search_grammar_ref":
+        return search_grammar_ref(ti["query"], ti.get("k", 3))
     if name == "filler_stats":
         return filler_stats(ti["file"], sp)
     if name == "vocab_stats":

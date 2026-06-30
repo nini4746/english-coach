@@ -1,95 +1,126 @@
-# English-habit coach — a multi-tool agent over conversation transcripts
+# English-habit coach — 대화 전사본 기반 멀티툴 AI 코치
 
-An AI agent that analyzes a conversation transcript (speech-to-text) and
-diagnoses your recurring English-speaking habits, tracks improvement across
-sessions, builds a vocabulary notebook, and generates practice drills.
+대화 전사본(STT)을 분석해 **영어 말하기 습관을 진단**하고, 세션별 개선을 추적하고,
+어휘 단어장을 만들고, 약점 맞춤 연습문제를 내주는 AI 에이전트.
 
-It's the lecture's agent loop (ask Claude → run the tools it requests → feed
-results back → repeat) wired to a set of tools over your transcripts, plus a
-Flask web UI. Design principle: **measurement is deterministic Python code; only
-judgement (grammar, Konglish, register) is the LLM.**
+강의의 에이전트 루프(Claude에게 묻기 → 요청한 툴 실행 → 결과 피드백 → 반복)에
+여러 툴 + 멀티뷰 Flask 웹 UI를 붙인 형태.
+
+**설계 원칙:** 측정은 결정적 파이썬 코드, 판단(문법/콩글리시/격식/대화능력)만 LLM.
+숫자는 재현 가능, LLM은 해석만.
+
+## 구조
 
 ```
 english-coach/
-├── agent.py            agent loop + CLI (interactive or one-shot)
-├── tools.py            the tools + SQLite persistence
-├── transcripts/        sample STT transcripts (Tutor / Me dialogue)
-├── sessions.db         metrics, errors, vocab, practice, saved analyses
+├── agent.py            에이전트 루프 + CLI (대화형 / 일회성)
+├── tools.py            툴 모음 + SQLite 영속화
+├── rag.py              문법 레퍼런스 RAG (chunk·embed·search)
+├── docs/               문법/콩글리시 레퍼런스 코퍼스 (.md)
+├── grammar_index.pkl   임베딩 인덱스 (첫 실행시 자동 생성)
+├── transcripts/        샘플 STT 전사본 (Tutor / Me 대화)
+├── sessions.db         지표·오류·단어·연습·저장된 분석
 ├── web/
-│   ├── app.py          Flask backend (JSON API + serves the SPA)
-│   └── static/         index.html / style.css / app.js (single-page UI)
+│   ├── app.py          Flask 백엔드 (JSON API + SPA 서빙, 구조화 진단)
+│   └── static/         index.html / style.css / app.js (멀티뷰 UI)
 ├── .env.example
-└── requirements.txt    anthropic, python-dotenv, flask
+└── requirements.txt    anthropic, python-dotenv, flask, sentence-transformers
 ```
 
-## The tools
+## 웹 UI — 6개 뷰 (햄버거 메뉴)
 
-| Tool | Kind | What it does |
+- **대시보드** — 스탯 카드(세션 수·최근 필러율·TTR·단어 수) + 필러 추이 차트 + 습관 TOP + 최근 분석
+- **분석하기** — 전사본 입력 → 에이전트 진단 → 구조화 카드 + 도구 호출 로그
+- **진척 추이** — 지표별 세션 추세 차트 + 반복 실수 프로필
+- **어휘 단어장** — 의미 묶음(theme)별 그룹, 수동 추가, 학습중↔외움 토글
+- **연습** — 약점 자동추천 → 문제 생성 → 풀이 → 채점 → 점수 기록
+- **분석 기록** — 저장된 분석 다시 보기
+
+## 툴
+
+| 툴 | 종류 | 설명 |
 |---|---|---|
-| `list_transcripts` / `load_transcript` | local | List files / preview one speaker's lines (filters to `Me`) |
-| `filler_stats` | deterministic | Filler count + rate per 100 words (um, uh, you know, like…) |
-| `vocab_stats` | deterministic | Type-token ratio + most-repeated content words |
-| `pace_stats` | deterministic | Avg sentence length + short-fragment count |
-| `formality_stats` | deterministic | Casual-marker rate → advise for a target register |
-| `find_pattern` | local | Regex search to confirm a suspected habit |
-| `save_session` / `get_trend` | SQLite | Store a fixed metric schema per date / trend over time |
-| `log_errors` / `my_weaknesses` | SQLite | Record classified mistakes / recurring-mistake profile |
-| `add_vocab` / `list_vocab` / `mark_vocab` | SQLite | Vocabulary notebook, grouped by meaning theme |
-| `create_practice` / `grade_practice` | SQLite | Generate a targeted drill / grade answers (score saved) |
+| `list_transcripts` / `load_transcript` | local | 파일 목록 / 한 화자 발화 미리보기 (기본 `Me`) |
+| `read_dialogue` | local | 전체 대화(양쪽 화자) — 이해·응답 적절성 판단용 |
+| `search_grammar_ref` | RAG | 문법 코퍼스에서 관련 규칙 검색 → 진단 근거·인용 |
+| `filler_stats` | 결정적 | 필러 수 + 100단어당 비율 (um, uh, you know, like…) |
+| `vocab_stats` | 결정적 | 어휘 다양성(TTR) + 최다 반복 내용어 |
+| `pace_stats` | 결정적 | 평균 문장 길이 + 짧은 단편 수 |
+| `formality_stats` | 결정적 | 캐주얼 표현 비율 → 목표 격식 조언 |
+| `find_pattern` | local | 의심 습관 정규식 검색 |
+| `save_session` / `get_trend` | SQLite | 고정 스키마 지표 저장(날짜당 1개) / 추세 |
+| `log_errors` / `my_weaknesses` | SQLite | 분류된 오류 기록 / 반복 실수 프로필 |
+| `add_vocab` / `list_vocab` / `mark_vocab` | SQLite | 단어장 (theme별 묶음, 상태 토글) |
+| `create_practice` / `grade_practice` | SQLite | 약점 맞춤 드릴 생성 / 채점(점수 저장) |
 
-Grammar/Konglish judgement is the agent's reasoning (quotes the phrase +
-correction). All counting is deterministic so numbers are reproducible.
+문법·콩글리시 판단은 에이전트가 추론(원문 인용 + 교정 제시). 카운팅은 전부 결정적이라 재현됨.
 
-## External APIs
+## 구조화 진단 (markdown 아님, JSON)
 
-Only one: the **Anthropic API** (Claude `claude-sonnet-4-6`). Every tool is
-local — pure-Python analyzers + a local SQLite file. STT is out of scope:
-transcripts are plain `.txt` from elsewhere (Whisper / Zoom / captions).
+웹 분석은 자유 텍스트 대신 **강제 tool_use로 구조화 JSON**을 받아 UI에서 카드로 렌더:
 
-## Setup
+- `summary`, `cefr_estimate`, `priority`
+- `top_habits[]` — 제목 · 카테고리 · 심각도 · 근거 · 원인(L1 간섭) · 원문→교정 예시 · 연습 팁
+- `conversation` — **이해·응답 / 참여도 / 응집성** (전체 대화 기반)
+- `register`, `vocabulary_upgrades`, `strengths`
+- `errors[]` — 고정 카테고리, 서버가 추세 추적용으로 로깅
+
+문체는 실제 과외쌤 말투(AI 티 제거: "전반적으로", 영혼 없는 칭찬, 이모지 금지).
+
+## 문법 레퍼런스 RAG
+
+진단할 때 문법 규칙을 LLM 기억에만 의존하지 않고, `docs/`의 레퍼런스 코퍼스에서
+**검색해 근거로 인용**한다 (chunk → embed → search → cite, Context-Management 프로젝트
+파이프라인 재사용).
+
+- 임베딩: `sentence-transformers/all-MiniLM-L6-v2` (로컬, API 키 불필요)
+- 코퍼스: 한국인 학습자 빈출 오류 6개 문서 (주어-동사 일치, 시제/현재완료, 관사,
+  복수형, 콩글리시, 전치사/격식)
+- 흐름: 에이전트가 오류마다 `search_grammar_ref(query)` 호출 → 규칙 chunk 검색 →
+  `why` 설명의 근거로 삼고 `references`에 출처 파일 인용
+- 인덱스는 첫 실행시 자동 빌드. 코퍼스를 바꾸면 `python rag.py`로 재빌드.
+
+## 외부 API
+
+**Anthropic API (Claude) 하나뿐.** 임베딩·검색·분석은 전부 로컬 — sentence-transformers
++ 순수 파이썬 + 로컬 SQLite. STT는 범위 밖: 전사본은 외부(Whisper/Zoom/자막)에서 만든 `.txt`.
+
+## 설치
 
 ```bash
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-cp .env.example .env        # put your real ANTHROPIC_API_KEY in .env
+cp .env.example .env        # .env에 본인 ANTHROPIC_API_KEY 입력 (절대 커밋 금지)
 ```
 
-## Run — web app (recommended)
+## 실행 — 웹앱 (권장)
 
 ```bash
 cd web
 python app.py               # http://127.0.0.1:5050
 ```
 
-Paste a transcript (or load a sample), set a date to track trends, hit 분석하기.
-You get: metric cards, a Korean coach report, a recurring-mistake profile, a
-trend chart, a themed vocabulary notebook, and a practice drill you can answer
-and have graded. Past analyses are saved and reloadable from "지난 분석".
+`COACH_DEBUG=1` 로 Flask 디버그/리로드 켜기 (기본 꺼짐).
 
-Set `COACH_DEBUG=1` to enable Flask debug/reload (off by default).
-
-## Run — CLI
+## 실행 — CLI
 
 ```bash
-python agent.py             # interactive (type 'exit' to quit)
+python agent.py             # 대화형 ('exit' 입력시 종료)
 python agent.py "Analyze session-2026-06-20.txt and list my top 3 habits."
 ```
 
-## How persistence is controlled (a bug we fixed)
+## 영속화는 서버가 통제 (고친 버그)
 
-The web backend — not the model — owns what gets written. The agent must never
-call `save_session`, and may only `log_errors` under the real date the server
-passes. Early on, analyzing without a date let the model invent dates
-(`2026-07-04`, …) and pollute the DB; locking persistence to the server fixed it.
-Likewise `save_session` computes a fixed metric schema itself instead of trusting
-LLM-authored JSON, so every session is directly comparable. Lesson: keep
-measurement and persistence in deterministic code; let the LLM judge, not count.
+무엇을 DB에 쓸지는 모델이 아니라 **서버**가 정함. 에이전트는 `save_session`을 절대
+호출하지 않고, `log_errors`도 서버가 넘긴 실제 날짜로만 기록. 초기엔 날짜 없이 분석하면
+모델이 날짜(`2026-07-04` 등)를 지어내 DB를 오염시켰고, 영속화를 서버로 잠가 해결.
+`save_session`도 LLM JSON을 믿지 않고 고정 스키마 지표를 직접 계산 → 모든 세션 비교 가능.
+교훈: 측정·영속화는 결정적 코드, LLM은 판단만.
 
-## Demo data
+## 데모 데이터
 
-`sessions.db` ships with two sample sessions (2026-06-20 → 2026-06-27) showing a
-clean improvement story: filler rate 20.0 → 2.8, TTR 0.532 → 0.682, and grammar
-mistakes dropping to zero in the later session. Delete `sessions.db` to start
-fresh (tables are recreated on first write).
+`sessions.db`에 두 샘플 세션(2026-06-20 → 2026-06-27) 포함 — 개선 스토리:
+필러율 20.0 → 2.8, TTR 0.532 → 0.682, 문법 오류는 후반 세션에서 0으로 감소.
+`sessions.db`를 지우면 초기화됨(첫 쓰기에서 테이블 재생성).

@@ -205,6 +205,9 @@ code { background: var(--panel-2); padding: 1px 6px; border-radius: 5px; font-si
 .dx-conv-rate.r-poor { color: var(--danger); }
 .dx-conv-note { color: var(--text); flex: 1; }
 .dx-conv-ex { font-size: 12.5px; color: var(--muted); margin: 2px 0 6px 74px; }
+.dx-ref { font-size: 13px; margin: 5px 0; }
+.dx-refsrc { font-family: ui-monospace, monospace; font-size: 12px; color: var(--accent); background: var(--panel-2);
+  border: 1px solid var(--border); padding: 1px 7px; border-radius: 5px; margin-right: 6px; }
 .dx-vu { font-size: 13.5px; margin: 6px 0; }
 .dx-over { color: var(--danger); }
 .dx-ex-line { color: var(--muted); font-size: 12.5px; margin-top: 2px; }

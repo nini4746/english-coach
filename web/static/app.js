@@ -99,6 +99,9 @@ function renderDiagnosis(d, elId = "report") {
       (v.example ? `<div class="dx-ex-line">"${e(v.example)}"</div>` : "") + `</div>`).join("") + `</div>`;
   if (d.strengths?.length)
     html += `<div class="dx-block dx-strength"><h3>강점</h3><ul>` + d.strengths.map((s) => `<li>${e(s)}</li>`).join("") + `</ul></div>`;
+  if (d.references?.length)
+    html += `<div class="dx-block"><h3>참고 규칙 (RAG)</h3>` + d.references.map((r) =>
+      `<div class="dx-ref"><span class="dx-refsrc">${e(r.source)}</span> ${e(r.note || "")}</div>`).join("") + `</div>`;
   el.innerHTML = html;
 }
 

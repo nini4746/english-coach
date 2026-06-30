@@ -90,6 +90,13 @@ DIAGNOSIS_TOOL = {
                         "required": ["rating", "note"]}},
                 "required": ["comprehension", "engagement", "coherence"],
             },
+            "references": {
+                "type": "array",
+                "description": "Grammar-reference sources you cited via search_grammar_ref (RAG).",
+                "items": {"type": "object", "properties": {
+                    "source": {"type": "string", "description": "Source filename, e.g. verb-agreement.md"},
+                    "note": {"type": "string", "description": "What rule it supports, in Korean."}},
+                    "required": ["source"]}},
             "strengths": {"type": "array", "items": {"type": "string"},
                           "description": "2-3 genuine strengths, in Korean."},
             "register": {
@@ -117,7 +124,7 @@ DIAGNOSIS_TOOL = {
                               "original": {"type": "string"}, "correction": {"type": "string"}},
                           "required": ["category", "original", "correction"]}},
         },
-        "required": ["summary", "priority", "top_habits", "conversation", "strengths", "errors"],
+        "required": ["summary", "priority", "top_habits", "conversation", "references", "strengths", "errors"],
     },
 }
 
@@ -158,6 +165,9 @@ DIAGNOSIS_SYSTEM = (
     "understand and actually answer the tutor's questions (comprehension), do they elaborate or "
     "just give short answers (engagement), and does their speech flow logically (coherence)? Fill "
     "the `conversation` field with concrete examples (quote a question and the off-target response). "
+    "For each major grammar/usage error, call search_grammar_ref to pull the matching rule from the "
+    "reference corpus, base your 'why' on it, and list the cited source files in `references` (RAG — "
+    "don't rely on memory for grammar rules). "
     "Distinguish real learner mistakes from natural spoken disfluency / STT artifacts. Do NOT call "
     "save_session or log_errors. When ready, call record_diagnosis ONCE.\n\n"
     "VOICE — write like a human tutor actually talking to this student, in natural Korean 존댓말. "
@@ -174,7 +184,7 @@ DIAGNOSIS_SYSTEM = (
 # Tools the agent may use while gathering (read-only analyzers), plus the terminal schema.
 GATHER_TOOLS = [t for t in T.TOOLS if t["name"] in
                 ("list_transcripts", "load_transcript", "read_dialogue", "filler_stats",
-                 "vocab_stats", "pace_stats", "formality_stats", "find_pattern")]
+                 "vocab_stats", "pace_stats", "formality_stats", "find_pattern", "search_grammar_ref")]
 
 
 def run_diagnosis(filename: str, speaker: str) -> dict:
