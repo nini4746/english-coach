@@ -80,11 +80,6 @@ english-coach/
   `why` 설명의 근거로 삼고 `references`에 출처 파일 인용
 - 인덱스는 첫 실행시 자동 빌드. 코퍼스를 바꾸면 `python rag.py`로 재빌드.
 
-## 외부 API
-
-**Anthropic API (Claude) 하나뿐.** 임베딩·검색·분석은 전부 로컬 — sentence-transformers
-+ 순수 파이썬 + 로컬 SQLite. STT는 범위 밖: 전사본은 외부(Whisper/Zoom/자막)에서 만든 `.txt`.
-
 ## 설치
 
 ```bash
