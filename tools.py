@@ -17,12 +17,14 @@ BASE = os.path.dirname(__file__)
 TRANSCRIPT_DIR = os.path.join(BASE, "transcripts")
 DB_PATH = os.path.join(BASE, "sessions.db")
 
-# Multi-word fillers checked first, then single words.
+# Multi-word fillers checked first, then single words. Ambiguous discourse
+# markers (like / so / well / right) are deliberately excluded: they're real
+# words at least as often as fillers ("I feel like going", "so that…"), so
+# counting them anywhere produced large false positives.
 FILLER_PATTERNS = [
     r"you know", r"i mean", r"sort of", r"kind of", r"\bum\b", r"\buh\b",
-    r"\ber\b", r"\bhmm\b", r"\blike\b", r"\bactually\b", r"\bbasically\b",
-    r"\bliterally\b", r"\bkinda\b", r"\bsorta\b", r"\bso\b", r"\bwell\b",
-    r"\bright\b",
+    r"\ber\b", r"\bhmm\b", r"\bactually\b", r"\bbasically\b",
+    r"\bliterally\b", r"\bkinda\b", r"\bsorta\b",
 ]
 
 STOPWORDS = {
@@ -60,7 +62,11 @@ def _read(file: str, speaker: str = "Me") -> str:
 
 
 def _words(text: str) -> list[str]:
-    return re.findall(r"[a-zA-Z']+", text.lower())
+    # Unicode-aware: normalize curly apostrophes, then match letters (any script)
+    # with internal apostrophes, so "café", "naïve", "don't", "I'm" stay whole
+    # instead of being shredded by an ASCII-only [a-zA-Z'] class.
+    text = text.lower().replace("’", "'")
+    return re.findall(r"[^\W\d_]+(?:'[^\W\d_]+)*", text)
 
 
 def list_transcripts() -> str:

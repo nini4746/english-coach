@@ -13,12 +13,13 @@ import sys
 # Make the parent package (tools.py, agent.py) importable.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import anthropic
 from anthropic import Anthropic
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request, send_from_directory
 
 import tools as T
-from agent import MODEL, SYSTEM
+from agent import MODEL, SYSTEM, LLM_TOOLS
 
 load_dotenv()
 client = Anthropic()
@@ -138,7 +139,7 @@ def run_agent(question: str) -> dict:
     for _ in range(MAX_STEPS):
         resp = client.messages.create(
             model=MODEL, max_tokens=2048, system=SYSTEM,
-            messages=messages, tools=T.TOOLS,
+            messages=messages, tools=LLM_TOOLS,
         )
         messages.append({"role": "assistant", "content": resp.content})
         calls = [b for b in resp.content if b.type == "tool_use"]
@@ -187,6 +188,28 @@ GATHER_TOOLS = [t for t in T.TOOLS if t["name"] in
                  "vocab_stats", "pace_stats", "formality_stats", "find_pattern", "search_grammar_ref")]
 
 
+class DiagnosisTruncated(Exception):
+    """The structured diagnosis hit the token ceiling, so its JSON is incomplete.
+
+    We refuse to persist or return a half-built diagnosis (it would show up as a
+    broken card and pollute the DB); the route turns this into a clean error.
+    """
+
+
+def _force_diagnosis(messages: list, prompt: str):
+    """Force the terminal record_diagnosis call; retry once with more headroom if
+    the first attempt is cut off. Raise DiagnosisTruncated if it still won't fit."""
+    messages = messages + [{"role": "user", "content": prompt}]
+    for max_tokens in (3000, 4096):
+        resp = client.messages.create(
+            model=MODEL, max_tokens=max_tokens, system=DIAGNOSIS_SYSTEM, messages=messages,
+            tools=[DIAGNOSIS_TOOL], tool_choice={"type": "tool", "name": "record_diagnosis"})
+        block = next((b for b in resp.content if b.type == "tool_use"), None)
+        if block is not None and resp.stop_reason != "max_tokens":
+            return block.input
+    raise DiagnosisTruncated("diagnosis exceeded the token budget")
+
+
 def run_diagnosis(filename: str, speaker: str) -> dict:
     """Agent gathers stats via tools, then emits a structured diagnosis (forced)."""
     messages = [{"role": "user", "content":
@@ -200,15 +223,15 @@ def run_diagnosis(filename: str, speaker: str) -> dict:
         calls = [b for b in resp.content if b.type == "tool_use"]
         diag = next((b for b in calls if b.name == "record_diagnosis"), None)
         if diag is not None:
+            if resp.stop_reason == "max_tokens":  # truncated tool_use — its JSON is incomplete
+                messages.pop()  # drop the broken assistant turn (dangling tool_use)
+                return {"diagnosis": _force_diagnosis(messages, "Call record_diagnosis with the full analysis."),
+                        "steps": steps}
             return {"diagnosis": diag.input, "steps": steps}
         if not calls:
             # Agent answered in prose — force the structured call.
-            messages.append({"role": "user", "content": "Now call record_diagnosis with the full analysis."})
-            resp = client.messages.create(
-                model=MODEL, max_tokens=3000, system=DIAGNOSIS_SYSTEM, messages=messages,
-                tools=[DIAGNOSIS_TOOL], tool_choice={"type": "tool", "name": "record_diagnosis"})
-            block = next((b for b in resp.content if b.type == "tool_use"), None)
-            return {"diagnosis": block.input if block else {}, "steps": steps}
+            return {"diagnosis": _force_diagnosis(messages, "Now call record_diagnosis with the full analysis."),
+                    "steps": steps}
         results = []
         for c in calls:
             try:
@@ -219,12 +242,8 @@ def run_diagnosis(filename: str, speaker: str) -> dict:
             results.append({"type": "tool_result", "tool_use_id": c.id, "content": out})
         messages.append({"role": "user", "content": results})
     # Out of steps — force structured output from what we have.
-    messages.append({"role": "user", "content": "Call record_diagnosis now with the full analysis."})
-    resp = client.messages.create(
-        model=MODEL, max_tokens=3000, system=DIAGNOSIS_SYSTEM, messages=messages,
-        tools=[DIAGNOSIS_TOOL], tool_choice={"type": "tool", "name": "record_diagnosis"})
-    block = next((b for b in resp.content if b.type == "tool_use"), None)
-    return {"diagnosis": block.input if block else {}, "steps": steps}
+    return {"diagnosis": _force_diagnosis(messages, "Call record_diagnosis now with the full analysis."),
+            "steps": steps}
 
 
 def _slug(name: str) -> str:
@@ -295,8 +314,15 @@ def analyze():
         saved = T.save_session(date, filename, speaker)
 
     # Structured diagnosis (JSON), not free-text markdown.
-    result = run_diagnosis(filename, speaker)
+    try:
+        result = run_diagnosis(filename, speaker)
+    except DiagnosisTruncated:
+        return jsonify({"error": "진단이 너무 길어 잘렸어요. 더 짧은 전사본으로 다시 시도해 주세요."}), 502
+    except anthropic.APIError as e:
+        return jsonify({"error": f"분석 모델 호출 실패 (잠시 후 다시 시도): {type(e).__name__}"}), 502
     diagnosis = result["diagnosis"]
+    if not diagnosis:  # never persist or return an empty "successful" analysis
+        return jsonify({"error": "진단을 생성하지 못했어요. 다시 시도해 주세요."}), 502
 
     # The server owns persistence: log the diagnosis's errors under the real date
     # only (the model never invents a date or calls save_session).
@@ -402,12 +428,25 @@ def practice_history():
 def practice_new():
     """Ask the agent to generate a drill for a focus area; return id + questions."""
     focus = (request.get_json(force=True).get("focus") or "verb_agreement").strip()
-    result = run_agent(
-        f"Create a 5-question fill-in-the-blank practice drill focused on '{focus}' for a "
-        f"Korean learner of English. Use create_practice to save it. Then just confirm.")
-    # Read back the newest practice row.
+    try:
+        result = run_agent(
+            f"Create a 5-question fill-in-the-blank practice drill focused on '{focus}' for a "
+            f"Korean learner of English. Use create_practice to save it. Then just confirm.")
+    except anthropic.APIError as e:
+        return jsonify({"error": f"연습 생성 모델 호출 실패 (잠시 후 다시): {type(e).__name__}"}), 502
+
+    # Find the drill THIS run created (not just the newest row, which could be a
+    # leftover from a previous request if create_practice never fired this time).
+    pid = None
+    for s in result["steps"]:
+        if s["tool"] == "create_practice":
+            m = re.search(r"Created practice #(\d+)", s["output"])
+            if m:
+                pid = int(m.group(1))
+    if pid is None:
+        return jsonify({"error": "drill was not created"}), 500
     conn = sqlite3.connect(T.DB_PATH)
-    row = conn.execute("SELECT id, focus, items_json FROM practice ORDER BY id DESC LIMIT 1").fetchone()
+    row = conn.execute("SELECT id, focus, items_json FROM practice WHERE id=?", (pid,)).fetchone()
     conn.close()
     if not row:
         return jsonify({"error": "drill was not created"}), 500

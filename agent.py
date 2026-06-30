@@ -25,6 +25,11 @@ client = Anthropic()
 MODEL = "claude-sonnet-4-6"
 MAX_STEPS = 12
 
+# Persistence is server-owned. The model never gets save_session / log_errors:
+# left in its hands it invents a session_date and re-pollutes the DB (the bug the
+# README describes). The server calls those functions directly with a real date.
+LLM_TOOLS = [t for t in TOOLS if t["name"] not in ("save_session", "log_errors")]
+
 SYSTEM = """You are an English-speaking coach. You analyze a transcript of the \
 student's conversation (often from speech-to-text) and diagnose their recurring \
 habits and weaknesses.
@@ -46,8 +51,6 @@ spoken style. When unsure whether something is an STT artifact, say so.
 You have tools beyond raw stats:
 - formality_stats — gauge how casual the speech is, then advise for the target register \
 (casual chat vs business/formal). Flag mismatches (e.g. 'gonna', 'yeah' in a work context).
-- log_errors — after you diagnose grammar/usage mistakes, record them classified into the \
-fixed categories so recurring mistakes are tracked over time. Always log what you found.
 - my_weaknesses — see which mistakes recur across sessions; use it to personalize advice \
 ('this is the 3rd session with verb-agreement slips').
 - add_vocab / list_vocab / mark_vocab — maintain a vocabulary notebook. When the student \
@@ -56,14 +59,15 @@ overuses a word, add an upgrade word with a note; track learning vs known.
 the student's top weakness (fill-in-the-blank with answers), and grade their responses.
 
 When diagnosing, give the student's top habits to fix (counts/quotes as evidence) and one \
-concrete practice tip each, then log the errors. Be encouraging, specific, personalized."""
+concrete practice tip each. Be encouraging, specific, personalized. (Saving metrics and \
+logging errors is handled by the server, not by you — just diagnose.)"""
 
 
 def answer_turn(messages: list) -> str:
     for _ in range(MAX_STEPS):
         resp = client.messages.create(
             model=MODEL, max_tokens=2048, system=SYSTEM,
-            messages=messages, tools=TOOLS,
+            messages=messages, tools=LLM_TOOLS,
         )
         messages.append({"role": "assistant", "content": resp.content})
 
