@@ -26,8 +26,8 @@ MODEL = "claude-sonnet-4-6"
 MAX_STEPS = 12
 
 # Persistence is server-owned. The model never gets save_session / log_errors:
-# left in its hands it invents a session_date and re-pollutes the DB (the bug the
-# README describes). The server calls those functions directly with a real date.
+# left in its hands it could invent a session_date and pollute the DB. The server
+# calls those functions directly with a real date.
 LLM_TOOLS = [t for t in TOOLS if t["name"] not in ("save_session", "log_errors")]
 
 SYSTEM = """You are an English-speaking coach. You analyze a transcript of the \
