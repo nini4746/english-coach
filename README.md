@@ -6,9 +6,6 @@
 에이전트 루프(Claude에게 묻기 → 요청한 툴 실행 → 결과 피드백 → 반복)에
 여러 툴 + 멀티뷰 Flask 웹 UI를 붙인 형태.
 
-**설계 원칙:** 측정은 결정적 파이썬 코드, 판단(문법/콩글리시/격식/대화능력)만 LLM.
-숫자는 재현 가능, LLM은 해석만.
-
 ## 구조
 
 ```
@@ -55,18 +52,6 @@ english-coach/
 
 문법·콩글리시 판단은 에이전트가 추론(원문 인용 + 교정 제시). 카운팅은 전부 결정적이라 재현됨.
 
-## 구조화 진단 (markdown 아님, JSON)
-
-웹 분석은 자유 텍스트 대신 **강제 tool_use로 구조화 JSON**을 받아 UI에서 카드로 렌더:
-
-- `summary`, `cefr_estimate`, `priority`
-- `top_habits[]` — 제목 · 카테고리 · 심각도 · 근거 · 원인(L1 간섭) · 원문→교정 예시 · 연습 팁
-- `conversation` — **이해·응답 / 참여도 / 응집성** (전체 대화 기반)
-- `register`, `vocabulary_upgrades`, `strengths`
-- `errors[]` — 고정 카테고리, 서버가 추세 추적용으로 로깅
-
-문체는 실제 과외쌤 말투(AI 티 제거: "전반적으로", 영혼 없는 칭찬, 이모지 금지).
-
 ## 문법 레퍼런스 RAG
 
 진단할 때 문법 규칙을 LLM 기억에만 의존하지 않고, `docs/`의 레퍼런스 코퍼스에서
@@ -104,13 +89,6 @@ python app.py               # http://127.0.0.1:5050
 python agent.py             # 대화형 ('exit' 입력시 종료)
 python agent.py "Analyze session-2026-06-20.txt and list my top 3 habits."
 ```
-
-## 영속화는 서버가 통제
-
-무엇을 DB에 쓸지는 모델이 아니라 **서버**가 정함. 모델에는 `save_session`·`log_errors`를
-아예 노출하지 않고(`LLM_TOOLS`), 영속화는 서버가 실제 날짜로만 수행 — 모델이 날짜를 지어내
-DB를 오염시킬 여지가 없음. `save_session`도 LLM JSON을 믿지 않고 고정 스키마 지표를 직접
-계산 → 모든 세션 비교 가능. 측정·영속화는 결정적 코드, LLM은 판단만.
 
 ## 데모 데이터
 
