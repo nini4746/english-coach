@@ -1,0 +1,18 @@
+Tutor: Welcome back! How has your week been?
+Me: It has been pretty good, thanks. I finished a big project at work, so I feel relieved now.
+Tutor: Congratulations! What was the project about?
+Me: It was a data dashboard for our sales team. I built the charts and connected them to our database.
+Tutor: That sounds challenging. Did you face any difficulties?
+Me: Yes, a few. The hardest part was making the queries fast enough. But I solved it by adding an index.
+Tutor: Nice problem-solving. Did you work alone?
+Me: No, I worked with two colleagues. We have known each other for about three years, so we collaborate well.
+Tutor: That's great teamwork. What did you do to relax afterward?
+Me: I watched a documentary about the ocean. It was fascinating, and I learned a lot about deep-sea creatures.
+Tutor: Oh, which one? I love nature documentaries.
+Me: It is called Blue Planet. The cinematography is stunning, and the narration is really calm and clear.
+Tutor: A classic choice. Are you planning anything for the weekend?
+Me: I am thinking about hiking if the weather is nice. I have not been outdoors much lately, so I want some fresh air.
+Tutor: That sounds healthy. Your English has improved a lot, by the way.
+Me: Thank you, that means a lot. I have been practicing every day, and I try to slow down instead of using fillers.
+Tutor: I can hear the difference. Keep it up.
+Me: I will. My next goal is to use more varied vocabulary so I do not repeat the same words.

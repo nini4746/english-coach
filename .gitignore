@@ -1,0 +1,14 @@
+# secrets — never commit the real API key
+.env
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# os
+.DS_Store
+
+# local database (uncomment to keep the demo data out of git)
+# sessions.db
