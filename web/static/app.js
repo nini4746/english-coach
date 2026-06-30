@@ -103,6 +103,23 @@ function renderDiagnosis(d, elId = "report") {
       (v.example ? `<div class="dx-ex-line">"${e(v.example)}"</div>` : "") + `</div>`).join("") + `</div>`;
   if (d.strengths?.length)
     html += `<div class="dx-block dx-strength"><h3>강점</h3><ul>` + d.strengths.map((s) => `<li>${e(s)}</li>`).join("") + `</ul></div>`;
+  const prep = d.prep_structure;
+  if (prep) {
+    const RT = { good: "좋음", mixed: "보통", poor: "미흡" };
+    html += `<div class="dx-block"><h3>PREP 구조</h3>
+      <div class="dx-conv"><span class="dx-conv-dim">구조화</span>
+        <span class="dx-conv-rate r-${prep.rating}">${RT[prep.rating] || prep.rating}</span>
+        <span class="dx-conv-note">${e(prep.note || "")}</span></div>`;
+    if (prep.tip)
+      html += `<div class="dx-tip"><b>연습 팁</b> ${e(prep.tip)}</div>`;
+    if (prep.examples?.length)
+      html += `<table class="dx-ex" style="margin-top:10px">
+        <tr><th>원문</th><th>PREP 적용 예시</th></tr>` +
+        prep.examples.map((x) =>
+          `<tr><td>${e(x.original)}</td><td>${e(x.rewritten)}</td></tr>`
+        ).join("") + `</table>`;
+    html += `</div>`;
+  }
   if (d.references?.length)
     html += `<div class="dx-block"><h3>참고 규칙 (RAG)</h3>` + d.references.map((r) =>
       `<div class="dx-ref"><span class="dx-refsrc">${e(r.source)}</span> ${e(r.note || "")}</div>`).join("") + `</div>`;
@@ -119,6 +136,30 @@ function renderSteps(steps) {
 }
 
 // ── analyze ───────────────────────────────────────────────────────
+const TOOL_LABEL = {
+  list_transcripts: "파일 목록 조회",
+  load_transcript: "전사본 불러오기",
+  read_dialogue: "전체 대화 읽기",
+  search_grammar_ref: "문법 참조 검색",
+  filler_stats: "필러 통계 분석",
+  vocab_stats: "어휘 다양성 분석",
+  pace_stats: "말 속도 분석",
+  find_pattern: "패턴 검색",
+  formality_stats: "격식 분석",
+  prep_stats: "PREP 구조 분석",
+  my_weaknesses: "반복 실수 조회",
+  add_vocab: "어휘 추가",
+};
+
+function getArgSummary(tool, input) {
+  if (!input) return "";
+  if (input.query) return input.query.slice(0, 50);
+  if (input.file) return input.file;
+  if (input.pattern) return input.pattern.slice(0, 40);
+  if (input.metric) return input.metric;
+  return "";
+}
+
 function loadSamples() {
   fetch("/api/transcripts").then((r) => r.json()).then((files) => {
     const sel = $("sampleSelect");
@@ -140,22 +181,101 @@ $("analyzeBtn").addEventListener("click", async () => {
   if (!text) { $("status").textContent = "전사본을 붙여넣거나 샘플을 먼저 불러오세요."; return; }
   const btn = $("analyzeBtn");
   btn.disabled = true;
-  $("status").innerHTML = `<span class="spinner"></span>에이전트가 분석 중 — 도구 실행 및 진단 작성…`;
+  $("status").innerHTML = `<span class="spinner"></span> 분석 시작 중…`;
   $("reportWrap").classList.add("hidden");
   $("stepsWrap").classList.add("hidden");
+  const log = $("progressLog");
+  log.innerHTML = "";
+  log.classList.remove("hidden");
   const payload = { speaker: $("speaker").value.trim() || "Me", date: $("date").value, text };
   if ($("sampleSelect").value) payload.filename = $("sampleSelect").value;
+
+  let lastItem = null;
+  let currentToolName = null;
+
+  function finishLastItem() {
+    if (!lastItem) return;
+    lastItem.classList.remove("running");
+    lastItem.classList.add("done");
+    const sp = lastItem.querySelector(".spinner");
+    if (sp) { const chk = document.createElement("span"); chk.className = "plog-check"; chk.textContent = "✓"; sp.replaceWith(chk); }
+  }
+
+  function startTool(toolName, label, args) {
+    if (toolName === currentToolName) {
+      return;
+    }
+    finishLastItem();
+    currentToolName = toolName;
+    currentToolCount = 1;
+    const item = document.createElement("div");
+    item.className = "plog-item running";
+    item.innerHTML = `<span class="spinner"></span><span class="plog-tool">${escapeHtml(label)}</span>`
+      + (args ? `<span class="plog-args">${escapeHtml(args)}</span>` : "");
+    log.appendChild(item);
+    item.scrollIntoView({ block: "nearest" });
+    lastItem = item;
+  }
+
   try {
-    const res = await fetch("/api/analyze", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-    const data = await res.json();
-    if (!res.ok) { $("status").textContent = data.error || "오류가 발생했습니다."; return; }
-    $("status").textContent = `${data.filename} 분석 완료 · 화자 "${data.speaker}"` + (data.saved ? " · 추세 저장됨" : "");
-    renderMetrics(data.metrics, "metrics");
-    renderDiagnosis(data.diagnosis, "report");
-    $("reportWrap").classList.remove("hidden");
-    renderSteps(data.steps || []);
-    loadHistory();
+    const res = await fetch("/api/analyze/stream", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const data = await res.json();
+      $("status").textContent = data.error || "오류가 발생했습니다.";
+      log.classList.add("hidden"); return;
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        let ev; try { ev = JSON.parse(line.slice(6)); } catch { continue; }
+        if (ev.type === "metrics") {
+          renderMetrics(ev.metrics, "metrics");
+        } else if (ev.type === "tool_call") {
+          const label = TOOL_LABEL[ev.tool] || ev.tool;
+          startTool(ev.tool, label, getArgSummary(ev.tool, ev.input));
+          $("status").innerHTML = `<span class="spinner"></span> <b>${escapeHtml(label)}</b> 실행 중…`;
+        } else if (ev.type === "tool_done") {
+          // handled by startTool on next call or finishLastItem on diagnosing
+        } else if (ev.type === "diagnosing") {
+          currentToolName = null;
+          startTool("__diagnosing__", "최종 진단 작성 중", "");
+          $("status").innerHTML = `<span class="spinner"></span> 진단 보고서 작성 중…`;
+        } else if (ev.type === "done") {
+          finishLastItem();
+          log.style.transition = "opacity 0.35s ease";
+          log.style.opacity = "0";
+          setTimeout(() => {
+            log.classList.add("hidden");
+            log.style.opacity = "";
+            log.style.transition = "";
+            $("status").textContent = `${ev.filename} 분석 완료 · 화자 "${ev.speaker}"` + (ev.saved ? " · 추세 저장됨" : "");
+            renderMetrics(ev.metrics, "metrics");
+            renderDiagnosis(ev.diagnosis, "report");
+            $("reportWrap").classList.remove("hidden");
+            renderSteps(ev.steps || []);
+            loadHistory();
+          }, 350);
+        } else if (ev.type === "error") {
+          finishLastItem();
+          log.style.transition = "opacity 0.35s ease";
+          log.style.opacity = "0";
+          setTimeout(() => { log.classList.add("hidden"); log.style.opacity = ""; log.style.transition = ""; }, 350);
+          $("status").textContent = ev.message || "오류가 발생했습니다.";
+        }
+      }
+    }
   } catch (err) {
+    log.classList.add("hidden");
     $("status").textContent = "요청 실패: " + err.message;
   } finally { btn.disabled = false; }
 });
@@ -206,15 +326,93 @@ async function loadVocab() {
   rows.forEach((v) => { (groups[v.theme || "기타"] ||= []).push(v); });
   el.innerHTML = Object.entries(groups).map(([theme, items]) =>
     `<div class="vgroup"><div class="vtheme">${escapeHtml(theme)}</div>` +
-    items.map((v) => `<div class="vitem"><span class="w">${escapeHtml(v.word)}</span>
+    items.map((v) => `<div class="vitem">
+      <span class="w">${escapeHtml(v.word)}</span>
       <span class="n">${escapeHtml(v.note || "")}</span>
-      <span class="badge ${v.status}" data-word="${escapeHtml(v.word)}" data-status="${v.status}">${v.status === "known" ? "외움 ✓" : "학습중"}</span></div>`).join("") +
+      <span class="badge ${v.status}" data-word="${escapeHtml(v.word)}" data-status="${v.status}">${v.status === "known" ? "외움 ✓" : "학습중"}</span>
+      <button class="test-btn" data-word="${escapeHtml(v.word)}" data-note="${escapeHtml(v.note || "")}">테스트 →</button>
+      </div>`).join("") +
     `</div>`).join("");
   el.querySelectorAll(".badge").forEach((b) => b.addEventListener("click", async () => {
     const next = b.dataset.status === "known" ? "learning" : "known";
     await fetch("/api/vocab/mark", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ word: b.dataset.word, status: next }) });
     loadVocab();
   }));
+  el.querySelectorAll(".test-btn").forEach((b) =>
+    b.addEventListener("click", () => startVocabTest(b.dataset.word, b.dataset.note)));
+}
+
+// ── vocab test ────────────────────────────────────────────────────
+async function startVocabTest(word, note) {
+  const panel = $("vocabTestPanel");
+  const content = $("vocabTestContent");
+  panel.classList.remove("hidden");
+  content.innerHTML = `<p class="hint"><span class="spinner"></span> "${escapeHtml(word)}" 테스트 준비 중…</p>`;
+  panel.scrollIntoView({ behavior: "smooth", block: "start" });
+  try {
+    const data = await fetch("/api/vocab/test/prompts", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ word, note }),
+    }).then((r) => r.json());
+    if (data.error) { content.innerHTML = `<p class="hint">${escapeHtml(data.error)}</p>`; return; }
+    renderTestPrompts(word, note, data.prompts);
+  } catch (e) { content.innerHTML = `<p class="hint">오류: ${e.message}</p>`; }
+}
+
+function renderTestPrompts(word, note, prompts) {
+  const e = escapeHtml;
+  $("vocabTestContent").innerHTML = `
+    <div class="test-header">
+      <span class="test-word">${e(word)}</span>
+      ${note ? `<span class="test-note">${e(note)}</span>` : ""}
+      <button class="ghost" id="testClose" style="margin-left:auto;margin-top:0;padding:6px 14px;font-size:13px">닫기</button>
+    </div>
+    <p class="hint" style="margin-top:0">'<b>${e(word)}</b>'를 사용해 각 상황에 맞는 영어 문장을 써 보세요.</p>
+    ${prompts.map((p, i) => `
+      <div class="test-q">
+        <div class="test-situation">${i + 1}. ${e(p)}</div>
+        <input class="test-input" data-i="${i}" placeholder="영어 문장을 입력하세요" />
+      </div>`).join("")}
+    <button id="testSubmitBtn" style="margin-top:6px">제출하기</button>
+    <div id="testResult"></div>`;
+  $("testClose").addEventListener("click", () => {
+    $("vocabTestPanel").classList.add("hidden");
+  });
+  $("testSubmitBtn").addEventListener("click", () => submitVocabTest(word, note));
+}
+
+async function submitVocabTest(word, note) {
+  const sentences = [...document.querySelectorAll(".test-input")].map((i) => i.value.trim());
+  if (sentences.some((s) => !s)) {
+    $("testResult").innerHTML = `<p class="hint" style="color:var(--danger)">문장 3개를 모두 입력해 주세요.</p>`;
+    return;
+  }
+  const btn = $("testSubmitBtn");
+  btn.disabled = true;
+  $("testResult").innerHTML = `<p class="hint"><span class="spinner"></span> 채점 중…</p>`;
+  try {
+    const data = await fetch("/api/vocab/test/grade", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ word, note, sentences }),
+    }).then((r) => r.json());
+    if (data.error) { $("testResult").innerHTML = `<p class="hint">${escapeHtml(data.error)}</p>`; btn.disabled = false; return; }
+    const e = escapeHtml;
+    const inputs = [...document.querySelectorAll(".test-input")];
+    let html = data.results.map((r, i) => `
+      <div class="test-res ${r.correct ? "pass" : "fail"}">
+        <span class="test-check">${r.correct ? "✓" : "✗"}</span>
+        <div>
+          <div class="test-sent">${e(inputs[i]?.value || "")}</div>
+          <div class="test-fb">${e(r.feedback || "")}</div>
+        </div>
+      </div>`).join("");
+    html += data.passed
+      ? `<div class="test-verdict pass">${data.score}/3 맞았어요! '외움'으로 변경됩니다.</div>`
+      : `<div class="test-verdict fail">${data.score}/3 맞았어요. 다시 학습 대상으로 들어갑니다.</div>`;
+    $("testResult").innerHTML = html;
+    btn.style.display = "none";
+    loadVocab();
+  } catch (err) { $("testResult").innerHTML = `<p class="hint">오류: ${err.message}</p>`; btn.disabled = false; }
 }
 
 // ── practice ──────────────────────────────────────────────────────

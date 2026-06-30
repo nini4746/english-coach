@@ -34,6 +34,20 @@ STOPWORDS = {
     "do", "did", "not", "no", "yes", "me", "him", "her", "them", "as", "if",
 }
 
+# PREP structure signal patterns.
+# 'so' and 'like' are excluded from P2/E because they're very common fillers;
+# using them here would produce massive false positives in learner speech.
+PREP_SIGNALS = {
+    "P": [r"\bi think\b", r"\bi believe\b", r"\bin my opinion\b",
+          r"\bi would say\b", r"\bmy point\b", r"\bi feel\b", r"\bi consider\b"],
+    "R": [r"\bbecause\b", r"\bsince\b", r"\bthat'?s?\s+why\b",
+          r"\bthe reason\b", r"\bdue to\b"],
+    "E": [r"\bfor example\b", r"\bfor instance\b", r"\bsuch as\b",
+          r"\bone example\b", r"\blike when\b", r"\bfor one\b"],
+    "P2": [r"\btherefore\b", r"\boverall\b", r"\bin conclusion\b",
+           r"\bto sum up\b", r"\bto summarize\b"],
+}
+
 
 def _safe_path(file: str) -> str:
     """Resolve a transcript filename to a path INSIDE TRANSCRIPT_DIR only.
@@ -385,6 +399,70 @@ def formality_stats(file: str, speaker: str = "Me") -> str:
 
 
 # ════════════════════════════════════════════════════════════════════════
+# PREP structure analysis
+# ════════════════════════════════════════════════════════════════════════
+def prep_stats(file: str, speaker: str = "Me") -> str:
+    """Detect PREP (Point → Reason → Example → Point-restate) structure in each
+    substantial student response.  Returns per-response element presence so the
+    agent can judge whether the student structures answers or just rambles."""
+    path = _safe_path(file)
+    if not os.path.exists(path):
+        return f"File not found: {file}"
+
+    # Group consecutive student lines into response blocks,
+    # paired with the tutor question that preceded them.
+    turns: list[tuple[str, str]] = []   # (tutor_q, student_resp)
+    cur_q, cur_r = "", []
+    with open(path, encoding="utf-8") as fh:
+        for raw in fh:
+            m = re.match(r"\s*([^:]+):\s?(.*)", raw.strip())
+            if not m:
+                continue
+            spk, text = m.group(1).strip(), m.group(2).strip()
+            if spk.lower() == speaker.lower():
+                cur_r.append(text)
+            else:
+                if cur_r:
+                    turns.append((cur_q, " ".join(cur_r)))
+                    cur_r = []
+                cur_q = text
+    if cur_r:
+        turns.append((cur_q, " ".join(cur_r)))
+
+    substantial = [(q, r) for q, r in turns if len(r.split()) >= 15]
+    if not substantial:
+        return "Not enough substantial responses for PREP analysis (need ≥15-word answers)."
+
+    rows = []
+    for q, resp in substantial[:8]:
+        low = resp.lower()
+        found = {k for k, patterns in PREP_SIGNALS.items()
+                 if any(re.search(p, low) for p in patterns)}
+        missing = [k for k in ("P", "R", "E", "P2") if k not in found]
+        rows.append({"q": q[:80], "resp": resp[:120] + ("…" if len(resp) > 120 else ""),
+                     "found": sorted(found), "missing": missing})
+
+    total = len(rows)
+    has = {k: sum(1 for r in rows if k in r["found"]) for k in ("P", "R", "E", "P2")}
+    avg = sum(len(r["found"]) for r in rows) / total
+
+    out = [
+        f"PREP analysis — {total} substantial responses (≥15 words)",
+        f"  Point(P): {has['P']}/{total}  Reason(R): {has['R']}/{total}  "
+        f"Example(E): {has['E']}/{total}  Restate(P2): {has['P2']}/{total}",
+        f"  avg elements per response: {avg:.1f}/4",
+        "",
+    ]
+    for i, r in enumerate(rows):
+        found_str = "+".join(r["found"]) if r["found"] else "none"
+        miss_str = " missing:" + "+".join(r["missing"]) if r["missing"] else ""
+        out.append(f"[{i+1}] ({found_str}{miss_str})")
+        out.append(f"  Q: {r['q']}")
+        out.append(f"  A: {r['resp']}")
+    return "\n".join(out)
+
+
+# ════════════════════════════════════════════════════════════════════════
 # Vocabulary notebook
 # ════════════════════════════════════════════════════════════════════════
 def add_vocab(word: str, note: str = "", theme: str = "", added_date: str = "") -> str:
@@ -547,6 +625,11 @@ TOOLS = [
      "description": "Register/formality signal: casual-marker rate (contractions, slang) so you can advise for a target register (casual vs business).",
      "input_schema": {"type": "object", "properties": {
          "file": {"type": "string"}, "speaker": {"type": "string"}}, "required": ["file"]}},
+    {"name": "prep_stats",
+     "description": "Detect PREP (Point→Reason→Example→Point-restate) structure in each substantial student "
+                    "response. Returns per-response element presence so you can judge whether answers are well-structured.",
+     "input_schema": {"type": "object", "properties": {
+         "file": {"type": "string"}, "speaker": {"type": "string"}}, "required": ["file"]}},
     {"name": "log_errors",
      "description": "Persist the grammar/usage errors you found for a session, classified into "
                     "fixed categories, so recurring mistakes can be tracked. Call after diagnosing.",
@@ -612,6 +695,8 @@ def dispatch(name: str, ti: dict) -> str:
         return get_trend(ti["metric"])
     if name == "formality_stats":
         return formality_stats(ti["file"], sp)
+    if name == "prep_stats":
+        return prep_stats(ti["file"], sp)
     if name == "log_errors":
         return log_errors(ti["session_date"], ti["errors_json"])
     if name == "my_weaknesses":

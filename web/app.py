@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import anthropic
 from anthropic import Anthropic
 from dotenv import load_dotenv
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, Response, jsonify, request, send_from_directory
 
 import tools as T
 from agent import MODEL, SYSTEM, LLM_TOOLS
@@ -124,6 +124,26 @@ DIAGNOSIS_TOOL = {
                                                     "plural", "word_choice", "word_order", "formality", "other"]},
                               "original": {"type": "string"}, "correction": {"type": "string"}},
                           "required": ["category", "original", "correction"]}},
+            "prep_structure": {
+                "type": "object",
+                "description": "PREP (Point→Reason→Example→Point-restate) structure analysis based on prep_stats output.",
+                "properties": {
+                    "rating": {"type": "string", "enum": ["good", "mixed", "poor"]},
+                    "note": {"type": "string",
+                             "description": "Korean explanation: which PREP elements the student uses or skips, with concrete quotes."},
+                    "tip": {"type": "string",
+                            "description": "One concrete drill or sentence-restructuring tip, in Korean."},
+                    "examples": {
+                        "type": "array",
+                        "description": "1-2 actual student responses showing PREP issues, each with a rewritten version.",
+                        "items": {"type": "object",
+                                  "properties": {
+                                      "original": {"type": "string"},
+                                      "rewritten": {"type": "string",
+                                                    "description": "The same idea restructured with P+R+E, in English."},
+                                      "missing": {"type": "array", "items": {"type": "string"}}},
+                                  "required": ["original", "rewritten", "missing"]}}},
+                "required": ["rating", "note", "tip"]},
         },
         "required": ["summary", "priority", "top_habits", "conversation", "references", "strengths", "errors"],
     },
@@ -166,6 +186,9 @@ DIAGNOSIS_SYSTEM = (
     "understand and actually answer the tutor's questions (comprehension), do they elaborate or "
     "just give short answers (engagement), and does their speech flow logically (coherence)? Fill "
     "the `conversation` field with concrete examples (quote a question and the off-target response). "
+    "Call prep_stats to analyze whether the student structures answers using PREP (Point→Reason→"
+    "Example→Point-restate). Fill the `prep_structure` field: rate it good/mixed/poor, explain "
+    "which elements are missing, and give a rewritten example showing the ideal PREP structure. "
     "For each major grammar/usage error, call search_grammar_ref to pull the matching rule from the "
     "reference corpus, base your 'why' on it, and list the cited source files in `references` (RAG — "
     "don't rely on memory for grammar rules). "
@@ -185,7 +208,8 @@ DIAGNOSIS_SYSTEM = (
 # Tools the agent may use while gathering (read-only analyzers), plus the terminal schema.
 GATHER_TOOLS = [t for t in T.TOOLS if t["name"] in
                 ("list_transcripts", "load_transcript", "read_dialogue", "filler_stats",
-                 "vocab_stats", "pace_stats", "formality_stats", "find_pattern", "search_grammar_ref")]
+                 "vocab_stats", "pace_stats", "formality_stats", "find_pattern",
+                 "search_grammar_ref", "prep_stats")]
 
 
 class DiagnosisTruncated(Exception):
@@ -200,7 +224,7 @@ def _force_diagnosis(messages: list, prompt: str):
     """Force the terminal record_diagnosis call; retry once with more headroom if
     the first attempt is cut off. Raise DiagnosisTruncated if it still won't fit."""
     messages = messages + [{"role": "user", "content": prompt}]
-    for max_tokens in (3000, 4096):
+    for max_tokens in (6000, 8192):
         resp = client.messages.create(
             model=MODEL, max_tokens=max_tokens, system=DIAGNOSIS_SYSTEM, messages=messages,
             tools=[DIAGNOSIS_TOOL], tool_choice={"type": "tool", "name": "record_diagnosis"})
@@ -217,7 +241,7 @@ def run_diagnosis(filename: str, speaker: str) -> dict:
     steps = []
     tools = GATHER_TOOLS + [DIAGNOSIS_TOOL]
     for _ in range(MAX_STEPS):
-        resp = client.messages.create(model=MODEL, max_tokens=3000, system=DIAGNOSIS_SYSTEM,
+        resp = client.messages.create(model=MODEL, max_tokens=8192, system=DIAGNOSIS_SYSTEM,
                                        messages=messages, tools=tools)
         messages.append({"role": "assistant", "content": resp.content})
         calls = [b for b in resp.content if b.type == "tool_use"]
@@ -246,6 +270,60 @@ def run_diagnosis(filename: str, speaker: str) -> dict:
             "steps": steps}
 
 
+def _diagnosis_events(filename: str, speaker: str):
+    """Generator version of run_diagnosis — yields SSE event dicts in real time."""
+    messages = [{"role": "user", "content":
+                 f"Analyze {filename} for speaker {speaker}. Gather stats, then call record_diagnosis."}]
+    steps = []
+    tools = GATHER_TOOLS + [DIAGNOSIS_TOOL]
+    for _ in range(MAX_STEPS):
+        resp = client.messages.create(model=MODEL, max_tokens=8192, system=DIAGNOSIS_SYSTEM,
+                                      messages=messages, tools=tools)
+        messages.append({"role": "assistant", "content": resp.content})
+        calls = [b for b in resp.content if b.type == "tool_use"]
+        diag = next((b for b in calls if b.name == "record_diagnosis"), None)
+        if diag is not None:
+            if resp.stop_reason == "max_tokens":
+                messages.pop()
+                yield {"type": "diagnosing"}
+                try:
+                    yield {"type": "diagnosis",
+                           "diagnosis": _force_diagnosis(messages, "Call record_diagnosis with the full analysis."),
+                           "steps": steps}
+                except DiagnosisTruncated:
+                    yield {"type": "error", "message": "진단이 너무 길어 잘렸어요. 더 짧은 전사본으로 다시 시도해 주세요."}
+                return
+            yield {"type": "diagnosis", "diagnosis": diag.input, "steps": steps}
+            return
+        if not calls:
+            yield {"type": "diagnosing"}
+            try:
+                yield {"type": "diagnosis",
+                       "diagnosis": _force_diagnosis(messages, "Now call record_diagnosis with the full analysis."),
+                       "steps": steps}
+            except DiagnosisTruncated:
+                yield {"type": "error", "message": "진단이 너무 길어 잘렸어요. 더 짧은 전사본으로 다시 시도해 주세요."}
+            return
+        results = []
+        for c in calls:
+            yield {"type": "tool_call", "tool": c.name, "input": {k: str(v)[:80] for k, v in c.input.items()}}
+            try:
+                out = T.dispatch(c.name, c.input)
+            except Exception as e:
+                out = f"Tool error in {c.name}: {e}"
+            steps.append({"tool": c.name, "input": c.input, "output": out})
+            yield {"type": "tool_done", "tool": c.name}
+            results.append({"type": "tool_result", "tool_use_id": c.id, "content": out})
+        messages.append({"role": "user", "content": results})
+    yield {"type": "diagnosing"}
+    try:
+        yield {"type": "diagnosis",
+               "diagnosis": _force_diagnosis(messages, "Call record_diagnosis now with the full analysis."),
+               "steps": steps}
+    except DiagnosisTruncated:
+        yield {"type": "error", "message": "진단이 너무 길어 잘렸어요. 더 짧은 전사본으로 다시 시도해 주세요."}
+
+
 def _slug(name: str) -> str:
     s = re.sub(r"[^a-zA-Z0-9_-]+", "-", name.strip()).strip("-")
     return s or "session"
@@ -267,6 +345,36 @@ def _safe_name(name: str) -> str:
     return base if base.endswith(".txt") else ""
 
 
+def _resolve_transcript(filename: str, text: str, date: str) -> str:
+    """Return the transcript filename to analyse, saving new text if needed.
+
+    - Existing sample selected and text unchanged → reuse the file as-is.
+    - New/edited text → save to a timestamped file so nothing gets overwritten.
+      Format: {date}_{HHMMSS}.txt  or  session_{YYYYMMDD_HHMMSS}.txt
+    """
+    from datetime import datetime
+    path_dir = T.TRANSCRIPT_DIR
+
+    if filename and os.path.isfile(os.path.join(path_dir, filename)):
+        with open(os.path.join(path_dir, filename), encoding="utf-8") as f:
+            existing = f.read()
+        if not (text and text.strip()) or text.strip() == existing.strip():
+            return filename  # unchanged sample — reuse
+
+    if not (text and text.strip()):
+        return filename  # no new text; caller will handle missing file
+
+    ts = datetime.now().strftime("%H%M%S")
+    if date:
+        target = f"{_slug(date)}_{ts}.txt"
+    else:
+        target = f"session_{datetime.now().strftime('%Y%m%d')}_{ts}.txt"
+
+    with open(os.path.join(path_dir, target), "w", encoding="utf-8") as f:
+        f.write(text)
+    return target
+
+
 @app.get("/api/transcript/<name>")
 def transcript(name):
     safe = _safe_name(name)
@@ -275,6 +383,48 @@ def transcript(name):
         return jsonify({"error": "not found"}), 404
     with open(path, encoding="utf-8") as f:
         return jsonify({"name": safe, "text": f.read()})
+
+
+@app.post("/api/analyze/stream")
+def analyze_stream():
+    body = request.get_json(force=True)
+    speaker = body.get("speaker") or "Me"
+    date = (body.get("date") or "").strip()
+    filename = _safe_name(body.get("filename"))
+    text = body.get("text")
+
+    if text and len(text) > MAX_TRANSCRIPT_CHARS:
+        return jsonify({"error": f"transcript too long (max {MAX_TRANSCRIPT_CHARS} chars)"}), 400
+
+    filename = _resolve_transcript(filename, text, date)
+    if not filename:
+        return jsonify({"error": "provide a filename or pasted text"}), 400
+
+    def generate():
+        metrics = T.compute_metrics(filename, speaker)
+        if metrics["total_words"] == 0:
+            yield f"data: {json.dumps({'type': 'error', 'message': f'화자 {speaker!r}의 발화가 없습니다.'})}\n\n"
+            return
+        yield f"data: {json.dumps({'type': 'metrics', 'metrics': metrics})}\n\n"
+        saved = T.save_session(date, filename, speaker) if date else None
+        try:
+            for event in _diagnosis_events(filename, speaker):
+                if event["type"] == "diagnosis":
+                    diagnosis = event["diagnosis"]
+                    if not diagnosis:
+                        yield f"data: {json.dumps({'type': 'error', 'message': '진단을 생성하지 못했어요.'})}\n\n"
+                        return
+                    if date and diagnosis.get("errors"):
+                        T.log_errors(date, json.dumps(diagnosis["errors"]))
+                    analysis_id = T.save_analysis(filename, speaker, metrics, json.dumps(diagnosis), date)
+                    yield f"data: {json.dumps({'type': 'done', 'filename': filename, 'speaker': speaker, 'metrics': metrics, 'saved': saved, 'analysis_id': analysis_id, 'diagnosis': diagnosis, 'steps': event['steps']})}\n\n"
+                else:
+                    yield f"data: {json.dumps(event)}\n\n"
+        except anthropic.APIError as e:
+            yield f"data: {json.dumps({'type': 'error', 'message': f'분석 모델 호출 실패: {type(e).__name__}'})}\n\n"
+
+    return Response(generate(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.post("/api/analyze")
@@ -288,20 +438,7 @@ def analyze():
     if text and len(text) > MAX_TRANSCRIPT_CHARS:
         return jsonify({"error": f"transcript too long (max {MAX_TRANSCRIPT_CHARS} chars)"}), 400
 
-    # Pasted/edited text becomes a new session file ONLY if it differs from the
-    # named sample — so picking an unchanged sample reuses it (no duplicate, no
-    # overwriting sample data). All file names are basename-sanitized.
-    target = None
-    if filename and os.path.isfile(os.path.join(T.TRANSCRIPT_DIR, filename)):
-        with open(os.path.join(T.TRANSCRIPT_DIR, filename), encoding="utf-8") as f:
-            existing = f.read()
-        if not (text and text.strip()) or text.strip() == existing.strip():
-            target = filename
-    if target is None and text and text.strip():
-        target = f"{_slug(date or 'pasted')}.txt"
-        with open(os.path.join(T.TRANSCRIPT_DIR, target), "w", encoding="utf-8") as f:
-            f.write(text)
-    filename = target or filename
+    filename = _resolve_transcript(filename, text, date)
     if not filename:
         return jsonify({"error": "provide a filename or pasted text"}), 400
 
@@ -406,6 +543,133 @@ def vocab_add():
     if not word:
         return jsonify({"error": "단어를 입력하세요."}), 400
     return jsonify({"msg": T.add_vocab(word, b.get("note", ""), b.get("theme", ""))})
+
+
+# (en) used for embedding, (ko) displayed to the user.
+# all-MiniLM-L6-v2 is English-only, so we embed the English label.
+_VOCAB_TEST_SITUATIONS = [
+    # ── formal / professional ──────────────────────────────────────────
+    {"en": "writing a formal business email to a client",                       "ko": "클라이언트에게 격식 있는 비즈니스 이메일을 쓸 때"},
+    {"en": "presenting quarterly results in a company meeting",                  "ko": "회사 회의에서 분기 결과를 발표할 때"},
+    {"en": "job interview describing your strengths and achievements",           "ko": "면접에서 자신의 강점과 성과를 말할 때"},
+    {"en": "writing a formal complaint letter to a company",                     "ko": "회사에 공식 불만 편지를 쓸 때"},
+    {"en": "negotiating terms in a professional business deal",                  "ko": "비즈니스 협상에서 조건을 조율할 때"},
+    {"en": "writing a performance review or evaluation report",                  "ko": "직원 성과 평가 보고서를 작성할 때"},
+    {"en": "giving a speech at a formal ceremony or conference",                 "ko": "공식 행사나 컨퍼런스에서 연설할 때"},
+    {"en": "writing a cover letter for a job application",                       "ko": "입사 지원서에 자기소개서를 쓸 때"},
+    {"en": "politely declining a request or invitation in writing",              "ko": "요청이나 초대를 정중하게 거절하는 글을 쓸 때"},
+    {"en": "recommending a colleague or employee in a reference letter",         "ko": "추천서에서 동료나 직원을 추천할 때"},
+    # ── academic ──────────────────────────────────────────────────────
+    {"en": "writing a university essay with a clear argument",                   "ko": "논거가 명확한 대학교 에세이를 쓸 때"},
+    {"en": "academic debate defending your thesis or position",                  "ko": "학술 토론에서 자신의 논지를 방어할 때"},
+    {"en": "explaining a complex scientific concept to a classmate",             "ko": "복잡한 과학 개념을 학우에게 설명할 때"},
+    {"en": "writing a research paper introduction or abstract",                  "ko": "연구 논문의 서론이나 초록을 작성할 때"},
+    {"en": "asking a professor a question after a lecture",                      "ko": "강의 후 교수님께 질문할 때"},
+    {"en": "citing evidence to support a claim in an essay",                     "ko": "에세이에서 주장을 뒷받침하는 근거를 들 때"},
+    # ── casual / social ────────────────────────────────────────────────
+    {"en": "chatting casually with a close friend about your weekend",           "ko": "친한 친구에게 주말 이야기를 편하게 할 때"},
+    {"en": "texting a friend to make plans for the evening",                     "ko": "친구에게 저녁 약속을 잡는 문자를 보낼 때"},
+    {"en": "posting a fun caption on Instagram or social media",                 "ko": "인스타그램에 재미있는 캡션을 쓸 때"},
+    {"en": "gossiping lightly with a coworker during a coffee break",            "ko": "커피 브레이크 때 동료와 가볍게 수다 떨 때"},
+    {"en": "giving a friend honest advice about a personal problem",             "ko": "친구의 고민에 솔직한 조언을 줄 때"},
+    {"en": "joking around with friends at a party",                              "ko": "파티에서 친구들과 장난치며 대화할 때"},
+    {"en": "reacting to surprising or exciting news from a friend",              "ko": "친구의 놀랍거나 신나는 소식에 반응할 때"},
+    {"en": "complimenting someone on their appearance or achievement",           "ko": "외모나 성취에 대해 칭찬할 때"},
+    # ── travel / daily life ────────────────────────────────────────────
+    {"en": "ordering food at a restaurant and asking about the menu",            "ko": "식당에서 음식을 주문하고 메뉴를 물어볼 때"},
+    {"en": "asking for directions from a stranger on the street",                "ko": "길에서 낯선 사람에게 길을 물어볼 때"},
+    {"en": "checking in at a hotel and asking about facilities",                 "ko": "호텔에서 체크인하며 시설을 물어볼 때"},
+    {"en": "shopping for clothes and asking a store assistant for help",         "ko": "옷 가게에서 점원에게 도움을 요청할 때"},
+    {"en": "making small talk with a stranger on a plane or train",              "ko": "비행기나 기차 안에서 옆 사람과 가볍게 대화할 때"},
+    {"en": "describing your hometown or country to a foreign tourist",           "ko": "외국인 관광객에게 고향이나 나라를 소개할 때"},
+    {"en": "reporting a problem to a doctor or pharmacist",                      "ko": "의사나 약사에게 증상을 설명할 때"},
+    {"en": "explaining a misunderstanding or mix-up to someone",                 "ko": "오해나 착각을 상대방에게 설명할 때"},
+    # ── emotions / personal ────────────────────────────────────────────
+    {"en": "describing how a place or experience made you feel",                 "ko": "어떤 장소나 경험이 어떤 감정을 줬는지 묘사할 때"},
+    {"en": "writing about a childhood memory in a personal essay",               "ko": "어린 시절 추억을 개인 에세이에 쓸 때"},
+    {"en": "apologising sincerely for a mistake you made",                       "ko": "자신의 실수에 대해 진심으로 사과할 때"},
+    {"en": "expressing excitement or enthusiasm about upcoming plans",           "ko": "다가올 계획에 대한 기대와 설렘을 표현할 때"},
+    {"en": "describing someone you admire and why they inspire you",             "ko": "존경하는 사람과 그 이유를 이야기할 때"},
+    {"en": "talking about your fears or worries with a trusted person",          "ko": "믿는 사람에게 두려움이나 걱정을 털어놓을 때"},
+    # ── media / entertainment ──────────────────────────────────────────
+    {"en": "reviewing a movie or TV show and recommending it to friends",        "ko": "영화나 드라마를 리뷰하며 친구에게 추천할 때"},
+    {"en": "summarising the plot of a book you recently read",                   "ko": "최근 읽은 책의 줄거리를 요약할 때"},
+    {"en": "discussing the outcome of a sports game with fans",                  "ko": "스포츠 경기 결과를 팬들과 이야기할 때"},
+    {"en": "describing a song or album and why you love it",                     "ko": "좋아하는 노래나 앨범을 설명하며 이유를 말할 때"},
+    {"en": "sharing a recipe or explaining how to cook a dish",                  "ko": "레시피를 공유하거나 요리 방법을 설명할 때"},
+    # ── explaining / persuading ────────────────────────────────────────
+    {"en": "explaining the cause and effect of a historical event",              "ko": "역사적 사건의 원인과 결과를 설명할 때"},
+    {"en": "persuading someone to change their opinion with logic",              "ko": "논리적으로 상대방의 의견을 바꾸려 설득할 때"},
+    {"en": "teaching a beginner how to use a device or software step by step",   "ko": "초보자에게 기기나 소프트웨어 사용법을 알려줄 때"},
+    {"en": "comparing two options and recommending the better one",              "ko": "두 가지 선택지를 비교하며 더 나은 것을 추천할 때"},
+    {"en": "describing the pros and cons of a decision",                         "ko": "어떤 결정의 장단점을 설명할 때"},
+    {"en": "expressing a strong opinion about a social or political issue",      "ko": "사회적·정치적 이슈에 대해 강한 의견을 표현할 때"},
+    {"en": "making a logical argument using examples and evidence",              "ko": "예시와 근거를 들어 논리적인 주장을 펼칠 때"},
+]
+
+_situation_vecs: list | None = None  # lazy-initialised on first request
+
+
+def _get_situation_vecs():
+    global _situation_vecs
+    if _situation_vecs is None:
+        from rag import _embed
+        vecs = _embed([s["en"] for s in _VOCAB_TEST_SITUATIONS])
+        _situation_vecs = vecs
+    return _situation_vecs
+
+
+@app.post("/api/vocab/test/prompts")
+def vocab_test_prompts():
+    b = request.get_json(force=True)
+    word = (b.get("word") or "").strip()
+    note = (b.get("note") or "").strip()
+    if not word:
+        return jsonify({"error": "단어를 입력하세요."}), 400
+    from rag import _embed
+    query = f"{word} {note}".strip()
+    [qvec] = _embed([query])
+    svecs = _get_situation_vecs()
+    # cosine similarity (vectors are already unit-normalised by rag._embed)
+    scored = sorted(range(len(svecs)),
+                    key=lambda i: -sum(a * b for a, b in zip(qvec, svecs[i])))
+    top3 = [_VOCAB_TEST_SITUATIONS[i]["ko"] for i in scored[:3]]
+    return jsonify({"word": word, "prompts": top3})
+
+
+@app.post("/api/vocab/test/grade")
+def vocab_test_grade():
+    b = request.get_json(force=True)
+    word = (b.get("word") or "").strip()
+    note = (b.get("note") or "").strip()
+    sentences = b.get("sentences", [])
+    if not word or len(sentences) != 3:
+        return jsonify({"error": "단어와 예문 3개가 필요합니다."}), 400
+    prompt = (
+        f"Word: '{word}'" + (f" (meaning: {note})" if note else "") + "\n\n"
+        "A Korean English learner wrote these 3 sentences. Judge if the word is used correctly "
+        "in meaning and context. Minor grammar mistakes are OK — focus only on whether the word "
+        "itself is used appropriately.\n\n"
+        + "\n".join(f"{i+1}. {s}" for i, s in enumerate(sentences))
+        + "\n\nReturn ONLY a JSON array of 3 objects, no explanation: "
+        '[{"correct": true, "feedback": "Korean one-sentence reason"}, ...]'
+    )
+    try:
+        resp = client.messages.create(
+            model=MODEL, max_tokens=600,
+            messages=[{"role": "user", "content": prompt}])
+        text = resp.content[0].text.strip()
+        m = re.search(r'\[.*\]', text, re.DOTALL)
+        if not m:
+            return jsonify({"error": "채점 실패"}), 500
+        results = json.loads(m.group())[:3]
+        score = sum(1 for r in results if r.get("correct"))
+        passed = score >= 2
+        T.mark_vocab(word, "known" if passed else "learning")
+        return jsonify({"results": results, "score": score, "total": 3,
+                        "passed": passed, "new_status": "known" if passed else "learning"})
+    except anthropic.APIError as e:
+        return jsonify({"error": f"모델 호출 실패: {type(e).__name__}"}), 502
 
 
 @app.get("/api/practice/history")

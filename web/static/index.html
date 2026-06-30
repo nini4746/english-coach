@@ -72,6 +72,7 @@
             <select id="historySelect" title="지난 분석 불러오기"><option value="">지난 분석 ▾</option></select></div>
           <div id="metrics" class="metrics"></div>
           <div id="status" class="status">왼쪽에 전사본을 넣고 <b>분석하기</b>를 누르세요.</div>
+          <div id="progressLog" class="hidden progress-log"></div>
           <div id="reportWrap" class="hidden"><div id="report" class="report"></div></div>
           <details id="stepsWrap" class="hidden steps">
             <summary>에이전트 도구 호출 (<span id="stepCount">0</span>)</summary>
@@ -125,6 +126,9 @@
       <section class="panel">
         <h2>내 단어</h2>
         <div id="vocab" class="vocab vocab-full"><span class="hint">단어장이 비어 있습니다.</span></div>
+      </section>
+      <section class="panel hidden" id="vocabTestPanel">
+        <div id="vocabTestContent"></div>
       </section>
     </section>
 
