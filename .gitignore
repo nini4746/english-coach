@@ -10,5 +10,8 @@ venv/
 # os
 .DS_Store
 
+# IDE
+.idea/
+
 # local database (uncomment to keep the demo data out of git)
 # sessions.db
