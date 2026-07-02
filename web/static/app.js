@@ -318,6 +318,22 @@ async function loadWeaknesses(elId) {
 }
 
 // ── vocab ─────────────────────────────────────────────────────────
+function renderDictPanel(dict) {
+  const e = escapeHtml;
+  return dict.meanings.map((m) => {
+    const syn = (m.synonyms || []).length
+      ? `<div class="dict-line"><span class="dict-label">유의어</span>${m.synonyms.map(e).join(", ")}</div>` : "";
+    const ant = (m.antonyms || []).length
+      ? `<div class="dict-line"><span class="dict-label">반의어</span>${m.antonyms.map(e).join(", ")}</div>` : "";
+    const ex = m.example
+      ? `<div class="dict-example">"${e(m.example)}"</div>` : "";
+    return `<div class="dict-meaning">
+      <div class="dict-def">${m.pos ? `<span class="dict-pos">${e(m.pos)}</span>` : ""}${e(m.definition)}</div>
+      ${ex}${syn}${ant}
+    </div>`;
+  }).join("");
+}
+
 async function loadVocab() {
   const rows = await fetch("/api/vocab").then((r) => r.json());
   const el = $("vocab");
@@ -326,12 +342,16 @@ async function loadVocab() {
   rows.forEach((v) => { (groups[v.theme || "기타"] ||= []).push(v); });
   el.innerHTML = Object.entries(groups).map(([theme, items]) =>
     `<div class="vgroup"><div class="vtheme">${escapeHtml(theme)}</div>` +
-    items.map((v) => `<div class="vitem">
+    items.map((v) => {
+      const hasDict = v.dict && v.dict.meanings && v.dict.meanings.length;
+      return `<div class="vitem">
       <span class="w">${escapeHtml(v.word)}</span>
       <span class="n">${escapeHtml(v.note || "")}</span>
       <span class="badge ${v.status}" data-word="${escapeHtml(v.word)}" data-status="${v.status}">${v.status === "known" ? "외움 ✓" : "학습중"}</span>
       <button class="test-btn" data-word="${escapeHtml(v.word)}" data-note="${escapeHtml(v.note || "")}">테스트 →</button>
-      </div>`).join("") +
+      ${hasDict ? `<div class="dict-panel">${renderDictPanel(v.dict)}</div>` : ""}
+      </div>`;
+    }).join("") +
     `</div>`).join("");
   el.querySelectorAll(".badge").forEach((b) => b.addEventListener("click", async () => {
     const next = b.dataset.status === "known" ? "learning" : "known";

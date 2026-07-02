@@ -253,13 +253,25 @@ code { background: var(--panel-2); padding: 1px 6px; border-radius: 5px; font-si
 .vgroup { margin-bottom: 12px; }
 .vtheme { font-size: 13px; font-weight: 700; color: var(--accent-2);
   border-bottom: 1px solid var(--border); padding-bottom: 6px; margin-bottom: 6px; }
-.vocab .vitem { display: flex; gap: 10px; align-items: baseline; padding: 8px 0; border-bottom: 1px solid var(--border); }
+.vocab .vitem { display: flex; flex-wrap: wrap; gap: 10px; align-items: baseline; padding: 8px 0; border-bottom: 1px solid var(--border); }
 .vocab .vitem:last-child { border-bottom: none; }
 .vocab .w { font-weight: 600; color: var(--accent); min-width: 110px; }
 .vocab .n { font-size: 13px; color: var(--muted); flex: 1; }
 .vocab .badge { font-size: 11px; padding: 2px 8px; border-radius: 20px; cursor: pointer; border: 1px solid var(--border); white-space: nowrap; }
 .vocab .badge.learning { color: var(--warn); }
 .vocab .badge.known { color: var(--accent-2); }
+
+/* dictionary info attached under each vocab row (always visible) */
+.vocab .dict-panel { flex-basis: 100%; margin-top: 4px; padding: 6px 0 2px 12px;
+  border-left: 2px solid var(--accent-2); }
+.vocab .dict-meaning + .dict-meaning { margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--border); }
+.vocab .dict-pos { display: inline-block; font-style: italic; color: var(--accent-2);
+  font-size: 12px; margin-right: 8px; }
+.vocab .dict-def { font-size: 13px; color: var(--text); line-height: 1.5; }
+.vocab .dict-example { font-size: 12.5px; color: var(--muted); font-style: italic; margin-top: 2px; }
+.vocab .dict-line { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.vocab .dict-label { display: inline-block; font-weight: 600; color: var(--text);
+  min-width: 46px; margin-right: 6px; }
 
 /* ── vocab test ── */
 .test-header { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }

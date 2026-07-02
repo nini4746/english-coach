@@ -235,10 +235,12 @@ def _db():
     conn.execute("""CREATE TABLE IF NOT EXISTS vocab (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         word TEXT UNIQUE, note TEXT, added_date TEXT, status TEXT DEFAULT 'learning')""")
-    # Migration: group words by meaning via a `theme` tag.
+    # Migration: group words by meaning via a `theme` tag; cache dictionary lookups.
     cols = {r[1] for r in conn.execute("PRAGMA table_info(vocab)")}
     if "theme" not in cols:
         conn.execute("ALTER TABLE vocab ADD COLUMN theme TEXT DEFAULT ''")
+    if "dict_json" not in cols:
+        conn.execute("ALTER TABLE vocab ADD COLUMN dict_json TEXT DEFAULT ''")
     conn.execute("""CREATE TABLE IF NOT EXISTS practice (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         focus TEXT, items_json TEXT)""")
@@ -465,21 +467,79 @@ def prep_stats(file: str, speaker: str = "Me") -> str:
 # ════════════════════════════════════════════════════════════════════════
 # Vocabulary notebook
 # ════════════════════════════════════════════════════════════════════════
+def _fetch_dictionary(word: str) -> str:
+    """Look the word up on the Free Dictionary API and return a compact JSON blob.
+
+    Returns '' on any failure (network, 404, malformed payload) — adding a word
+    must not depend on this call succeeding. Keeps only the first definition per
+    part-of-speech (up to 3 POS) so the card stays scannable.
+    """
+    import urllib.parse
+    import urllib.request
+    url = f"https://api.dictionaryapi.dev/api/v2/entries/en/{urllib.parse.quote(word)}"
+    # The API rejects the default Python-urllib UA with 403; send a real one.
+    req = urllib.request.Request(url, headers={"User-Agent": "english-coach/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.load(resp)
+    except Exception:
+        return ""
+    if not (isinstance(data, list) and data):
+        return ""
+    meanings, seen_pos = [], set()
+    for entry in data:
+        for m in entry.get("meanings", []) or []:
+            pos = m.get("partOfSpeech", "") or ""
+            if pos in seen_pos:
+                continue
+            defs = m.get("definitions") or []
+            if not defs:
+                continue
+            d0 = defs[0]
+            syn = list(dict.fromkeys((m.get("synonyms") or []) + (d0.get("synonyms") or [])))[:8]
+            ant = list(dict.fromkeys((m.get("antonyms") or []) + (d0.get("antonyms") or [])))[:8]
+            meanings.append({
+                "pos": pos,
+                "definition": d0.get("definition", "") or "",
+                "example": d0.get("example", "") or "",
+                "synonyms": syn,
+                "antonyms": ant,
+            })
+            seen_pos.add(pos)
+            if len(meanings) >= 3:
+                break
+        if len(meanings) >= 3:
+            break
+    if not meanings:
+        return ""
+    return json.dumps({"meanings": meanings}, ensure_ascii=False)
+
+
 def add_vocab(word: str, note: str = "", theme: str = "", added_date: str = "") -> str:
     """Add a word/phrase to the vocabulary notebook.
 
     note = meaning or example. theme = a short meaning-group label so similar
     words cluster together (e.g. '흥미로움 표현', '격식체 대체어'). Reuse the same
     theme string for synonyms so they're shown together.
+
+    On first insert, fetches Free Dictionary API and caches the result in
+    `dict_json`; subsequent re-adds of the same word never re-hit the API.
     """
     word = word.strip()
     if not word:
         return "Empty word."
     with _db() as conn:
+        existing = conn.execute("SELECT dict_json FROM vocab WHERE word=?", (word,)).fetchone()
+        cached = existing[0] if existing else ""
+        dict_json = cached or _fetch_dictionary(word)
+        # Preserve any already-cached dict entry on update (never overwrite with an empty fetch).
         conn.execute(
-            "INSERT INTO vocab(word, note, added_date, theme, status) VALUES(?,?,?,?,'learning') "
-            "ON CONFLICT(word) DO UPDATE SET note=excluded.note, theme=excluded.theme",
-            (word, note, added_date, theme))
+            "INSERT INTO vocab(word, note, added_date, theme, dict_json, status) "
+            "VALUES(?,?,?,?,?,'learning') "
+            "ON CONFLICT(word) DO UPDATE SET note=excluded.note, theme=excluded.theme, "
+            "dict_json=CASE WHEN COALESCE(vocab.dict_json,'')='' "
+            "               THEN excluded.dict_json ELSE vocab.dict_json END",
+            (word, note, added_date, theme, dict_json))
     return f"Added/updated vocab: {word!r} (theme: {theme or '—'})."
 
 

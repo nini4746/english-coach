@@ -30,6 +30,41 @@ MAX_STEPS = 12
 # calls those functions directly with a real date.
 LLM_TOOLS = [t for t in TOOLS if t["name"] not in ("save_session", "log_errors")]
 
+
+# ── Anthropic ephemeral prompt caching ────────────────────────────────
+# Static prefixes (system prompt, tool definitions) and the growing conversation
+# prefix inside an agent loop are marked with cache_control so subsequent calls
+# within the 5-min TTL are billed at 10% of the input rate. In a diagnosis run
+# the tool-result history dominates input tokens, so caching it across the loop
+# is the biggest single cost win short of switching models.
+def _cached_system(text: str) -> list:
+    """Turn a system prompt string into a cacheable structured block."""
+    return [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}]
+
+
+def _cached_tools(tools: list) -> list:
+    """Mark the end of the tools list as a cache breakpoint so the whole
+    schema block is cached."""
+    if not tools:
+        return tools
+    return [*tools[:-1], {**tools[-1], "cache_control": {"type": "ephemeral"}}]
+
+
+def _cache_messages_tail(messages: list) -> list:
+    """Mark the last content block of the last message so the next iteration
+    of an agent loop hits cache on the entire prior conversation. Plain-string
+    message content (the very first user turn) can't take cache_control; the
+    function returns the list unchanged in that case."""
+    if not messages:
+        return messages
+    last = messages[-1]
+    content = last.get("content")
+    if not isinstance(content, list) or not content:
+        return messages
+    new_tail = {**content[-1], "cache_control": {"type": "ephemeral"}}
+    return [*messages[:-1], {**last, "content": [*content[:-1], new_tail]}]
+
+
 SYSTEM = """You are an English-speaking coach. You analyze a transcript of the \
 student's conversation (often from speech-to-text) and diagnose their recurring \
 habits and weaknesses.
@@ -63,11 +98,15 @@ concrete practice tip each. Be encouraging, specific, personalized. (Saving metr
 logging errors is handled by the server, not by you — just diagnose.)"""
 
 
+SYSTEM_CACHED = _cached_system(SYSTEM)
+LLM_TOOLS_CACHED = _cached_tools(LLM_TOOLS)
+
+
 def answer_turn(messages: list) -> str:
     for _ in range(MAX_STEPS):
         resp = client.messages.create(
-            model=MODEL, max_tokens=2048, system=SYSTEM,
-            messages=messages, tools=LLM_TOOLS,
+            model=MODEL, max_tokens=2048, system=SYSTEM_CACHED,
+            messages=_cache_messages_tail(messages), tools=LLM_TOOLS_CACHED,
         )
         messages.append({"role": "assistant", "content": resp.content})
 

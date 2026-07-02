@@ -19,7 +19,8 @@ from dotenv import load_dotenv
 from flask import Flask, Response, jsonify, request, send_from_directory
 
 import tools as T
-from agent import MODEL, SYSTEM, LLM_TOOLS
+from agent import (MODEL, SYSTEM_CACHED, LLM_TOOLS_CACHED,
+                   _cached_system, _cached_tools, _cache_messages_tail)
 
 load_dotenv()
 client = Anthropic()
@@ -158,8 +159,8 @@ def run_agent(question: str) -> dict:
     steps = []
     for _ in range(MAX_STEPS):
         resp = client.messages.create(
-            model=MODEL, max_tokens=2048, system=SYSTEM,
-            messages=messages, tools=LLM_TOOLS,
+            model=MODEL, max_tokens=2048, system=SYSTEM_CACHED,
+            messages=_cache_messages_tail(messages), tools=LLM_TOOLS_CACHED,
         )
         messages.append({"role": "assistant", "content": resp.content})
         calls = [b for b in resp.content if b.type == "tool_use"]
@@ -211,6 +212,14 @@ GATHER_TOOLS = [t for t in T.TOOLS if t["name"] in
                  "vocab_stats", "pace_stats", "formality_stats", "find_pattern",
                  "search_grammar_ref", "prep_stats")]
 
+# Cached forms of the diagnosis system prompt and tool lists. The system prompt
+# (~1.5k tokens) + tool schemas (~4k tokens with record_diagnosis) are the biggest
+# static chunks re-sent on every turn of the agent loop; caching them cuts the
+# per-turn input bill on those prefixes to 10% after the first request.
+DIAGNOSIS_SYSTEM_CACHED = _cached_system(DIAGNOSIS_SYSTEM)
+DIAGNOSIS_TOOLS_CACHED = _cached_tools(GATHER_TOOLS + [DIAGNOSIS_TOOL])
+DIAGNOSIS_FORCE_TOOL_CACHED = _cached_tools([DIAGNOSIS_TOOL])
+
 
 class DiagnosisTruncated(Exception):
     """The structured diagnosis hit the token ceiling, so its JSON is incomplete.
@@ -226,8 +235,9 @@ def _force_diagnosis(messages: list, prompt: str):
     messages = messages + [{"role": "user", "content": prompt}]
     for max_tokens in (6000, 8192):
         resp = client.messages.create(
-            model=MODEL, max_tokens=max_tokens, system=DIAGNOSIS_SYSTEM, messages=messages,
-            tools=[DIAGNOSIS_TOOL], tool_choice={"type": "tool", "name": "record_diagnosis"})
+            model=MODEL, max_tokens=max_tokens, system=DIAGNOSIS_SYSTEM_CACHED,
+            messages=_cache_messages_tail(messages),
+            tools=DIAGNOSIS_FORCE_TOOL_CACHED, tool_choice={"type": "tool", "name": "record_diagnosis"})
         block = next((b for b in resp.content if b.type == "tool_use"), None)
         if block is not None and resp.stop_reason != "max_tokens":
             return block.input
@@ -239,10 +249,10 @@ def run_diagnosis(filename: str, speaker: str) -> dict:
     messages = [{"role": "user", "content":
                  f"Analyze {filename} for speaker {speaker}. Gather stats, then call record_diagnosis."}]
     steps = []
-    tools = GATHER_TOOLS + [DIAGNOSIS_TOOL]
+    tools = DIAGNOSIS_TOOLS_CACHED
     for _ in range(MAX_STEPS):
-        resp = client.messages.create(model=MODEL, max_tokens=8192, system=DIAGNOSIS_SYSTEM,
-                                       messages=messages, tools=tools)
+        resp = client.messages.create(model=MODEL, max_tokens=8192, system=DIAGNOSIS_SYSTEM_CACHED,
+                                       messages=_cache_messages_tail(messages), tools=tools)
         messages.append({"role": "assistant", "content": resp.content})
         calls = [b for b in resp.content if b.type == "tool_use"]
         diag = next((b for b in calls if b.name == "record_diagnosis"), None)
@@ -275,10 +285,10 @@ def _diagnosis_events(filename: str, speaker: str):
     messages = [{"role": "user", "content":
                  f"Analyze {filename} for speaker {speaker}. Gather stats, then call record_diagnosis."}]
     steps = []
-    tools = GATHER_TOOLS + [DIAGNOSIS_TOOL]
+    tools = DIAGNOSIS_TOOLS_CACHED
     for _ in range(MAX_STEPS):
-        resp = client.messages.create(model=MODEL, max_tokens=8192, system=DIAGNOSIS_SYSTEM,
-                                      messages=messages, tools=tools)
+        resp = client.messages.create(model=MODEL, max_tokens=8192, system=DIAGNOSIS_SYSTEM_CACHED,
+                                      messages=_cache_messages_tail(messages), tools=tools)
         messages.append({"role": "assistant", "content": resp.content})
         calls = [b for b in resp.content if b.type == "tool_use"]
         diag = next((b for b in calls if b.name == "record_diagnosis"), None)
@@ -522,12 +532,20 @@ def vocab():
     conn = sqlite3.connect(T.DB_PATH)
     try:
         rows = conn.execute(
-            "SELECT word, note, status, COALESCE(theme,'') FROM vocab ORDER BY theme, word").fetchall()
+            "SELECT word, note, status, COALESCE(theme,''), COALESCE(dict_json,'') "
+            "FROM vocab ORDER BY theme, word").fetchall()
     except sqlite3.OperationalError:
         return jsonify([])
     finally:
         conn.close()
-    return jsonify([{"word": w, "note": n, "status": s, "theme": t or "기타"} for w, n, s, t in rows])
+    out = []
+    for w, n, s, t, dj in rows:
+        try:
+            dic = json.loads(dj) if dj else None
+        except json.JSONDecodeError:
+            dic = None
+        out.append({"word": w, "note": n, "status": s, "theme": t or "기타", "dict": dic})
+    return jsonify(out)
 
 
 @app.post("/api/vocab/mark")
