@@ -271,6 +271,126 @@ await speech.listen(
 - `debate_submissions` — 사천왕 라운드별 녹음 + AI 채점 결과
 - `champions` — 분기별 코알리숑별 챔피언 이력
 
+## 핵심 학습 루프 — 예문 만들기 파이프라인
+
+두호링고의 시그니처 학습 활동. 단어 → 상황 카드 제시 → 유저 예문 작성 → AI 채점 → 피드백.
+
+### 흐름
+1. 유저 티어(CEFR)에 맞춰 학습 대상 단어 선택
+2. 단어와 코사인 유사도가 높은 상황 카드 1개 제시 (top-5 중 로테이션)
+3. 유저가 그 단어를 그 상황에 맞게 쓴 영어 예문 입력
+4. Claude가 rubric으로 문법/단어사용/상황적합 채점 + 교정본 제시
+5. 점수·틀린 부분을 `practice_attempts`, `word_mastery`에 기록 → 랭킹 포인트 반영
+
+### 아키텍처 결정 (확정)
+
+**1. 임베딩 모델: `multilingual-e5-small`**
+- 이유: 상황(situation) 카드를 한국어로 저장·표시할 계획 → 한국어 의미 이해 필수
+- 크기 470MB, 100ms/embedding, 영어 벤치 5~10% 손해 감수
+- 기존 `rag.py`의 `all-MiniLM-L6-v2` 는 `docs/` 문법 인덱스에서 계속 사용 (두 모델 병존)
+
+**2. 단어 규모: 8000 코어 + 동적 확장**
+- CEFR A1~C1 커버 (42 카뎃 타겟층에 정확)
+- 소스: NGSL(2801) + Oxford 5000 + CEFR-J + AWL 조합, 중복 제거
+- 롱테일은 유저가 개인 단어장에 추가할 때 온디맨드로 임베딩 (`_fetch_dictionary` 재활용)
+- 30k+ 미리 만들지 않음: 상황 매칭 밀도·큐레이션 품질·롤백 비용 관점에서 손해
+
+**3. 예문 평가: Claude 단일 콜 rubric**
+- 문법·단어사용·상황적합을 한 프롬프트로 채점 → JSON 반환
+- Haiku 4.5 기준 문장당 약 $0.0002 → 유저 100명 매일 20문장 = 월 $12 수준
+- 기존 ephemeral 프롬프트 캐싱으로 rubric 시스템 블록 80~90% 캐시 히트
+- 향후 문법 정확도 이슈 시 LanguageTool을 앞단에 추가하는 다단계 전환 가능
+
+### 상황(situation) 데이터 설계
+
+**규모**: 500~1000개 손큐레이션
+
+**카테고리 축** (밸런스 유지):
+- Register: formal / neutral / casual
+- Time: past / present / future / general truth
+- Emotion: neutral / positive / negative / uncertain
+- Setting: workplace / school / social / travel / online / 42-context (코드 리뷰, 스탠드업 등)
+
+**저장 언어**: 한국어 (유저가 맥락 이해 → 영어 산출)
+
+**예시**:
+```
+"카뎃 동료에게 pull request의 리팩터링 이유를 설명하는 상황
+ (workplace, neutral, present, explaining)"
+```
+
+**생성 방식**: Claude로 카테고리별 초안 대량 생성 → 사람이 밸런싱·중복 제거·톤 검토
+
+### DB 스키마 (기존 sessions.db에 추가)
+
+```sql
+CREATE TABLE vocab_master (
+    id INTEGER PRIMARY KEY,
+    word TEXT UNIQUE,
+    pos TEXT,
+    definition TEXT,
+    cefr_level TEXT,          -- A1~C2
+    seed_example TEXT,
+    embedding BLOB            -- multilingual-e5-small, 384-dim float32
+);
+
+CREATE TABLE situations (
+    id INTEGER PRIMARY KEY,
+    situation TEXT,           -- 한국어
+    register TEXT,
+    time_frame TEXT,
+    emotion TEXT,
+    setting TEXT,
+    tags TEXT,
+    embedding BLOB
+);
+
+CREATE TABLE practice_attempts (
+    id INTEGER PRIMARY KEY,
+    user_id TEXT,
+    word_id INTEGER,
+    situation_id INTEGER,
+    sentence TEXT,
+    scores_json TEXT,        -- {grammar, word_usage, situation_fit, overall}
+    feedback TEXT,
+    improved_version TEXT,
+    created_at TEXT
+);
+
+CREATE TABLE word_mastery (
+    user_id TEXT,
+    word_id INTEGER,
+    attempts INTEGER,
+    avg_score REAL,
+    last_practiced TEXT,
+    PRIMARY KEY (user_id, word_id)
+);
+```
+
+### 예상 용량
+
+| 요소 | 크기 |
+|---|---|
+| 8000 단어 (벡터 + 메타) | ~16 MB |
+| 1000 상황 (벡터 + 메타) | ~1.5 MB |
+| 모델 파일 (`multilingual-e5-small`) | ~470 MB (서버 리소스만 차지) |
+| 유저별 practice_attempts (1년치 예상) | ~수 MB |
+
+### 구현 단계
+
+- **A. 데이터 준비**: 워드리스트 확보 → Free Dictionary API로 정의 채우기 → SQLite 적재
+- **B. 상황 큐레이션**: Claude 초안 생성 → 사람 밸런싱 → SQLite 적재
+- **C. 임베딩 빌드**: `scripts/build_embeddings.py` — 원샷 스크립트
+- **D. 검색 레이어**: `vector_store.py` — 메모리 로드 + numpy 내적 top-k
+- **E. 평가 파이프라인**: `evaluator.py` — Claude rubric 콜
+- **F. 툴 등록**: `pick_practice_word`, `get_situation_for_word`, `evaluate_example` 을 `tools.py`에 추가
+- **G. 웹/앱 UI**: 예문 만들기 뷰 (단어 카드 + 상황 카드 + 입력 + 채점 결과)
+
+### 랭킹 시스템과의 연동
+- `practice_attempts.scores_json.overall` → MMR 포인트로 환산
+- 상황 카드 로테이션(top-5) 으로 반복 방지 + 다양성 확보
+- CEFR 레벨을 티어와 매핑해서 유저 수준에 맞는 단어 자동 선택 (챌린저·마스터일수록 C1~C2 비중 증가)
+
 ## 실행 로드맵
 
 **핵심 원칙**: 작은 것부터 검증. 랭킹/토론 시스템은 사용자 기반이 없으면 죽은 기능이 됨. 각 단계마다 게이트를 두고 다음 단계 진입 여부 판단.
@@ -351,3 +471,11 @@ Flutter로 이전, 백엔드는 그대로.
 - [ ] AI 유창도 지표별 가중치 결정 및 채점 프롬프트 설계
 - [ ] 코알리숑별 인원 실측 후 사천왕 규모 조정 여부 판단
 - [ ] 명예의 전당 UI 설계
+- [ ] NGSL/Oxford 5000/CEFR-J 워드리스트 확보 및 8000 단어 정제
+- [ ] 상황 카드 카테고리 축 확정 및 초안 프롬프트 설계
+- [ ] `multilingual-e5-small` 도입 (기존 `rag.py`와 병존 확인)
+- [ ] `vocab_master` / `situations` / `practice_attempts` / `word_mastery` 스키마 마이그레이션 스크립트
+- [ ] `evaluate_example` Claude rubric 프롬프트 튜닝 및 채점 편차 실측
+- [ ] CEFR 레벨 ↔ 랭킹 티어 매핑 규칙 정의
+- [ ] 분석하기 탭 `#metrics` 카드를 인라인 칩으로 압축 (대시보드·기록 뷰는 유지)
+- [ ] 어휘 SRS: `vocab` 테이블에 `next_review`/`interval_days`/`ease` 추가, "오늘 복습 N개" 큐 UI + `/api/vocab/review/today`
